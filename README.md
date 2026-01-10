@@ -85,14 +85,6 @@ To enable the "Login to Panel" button in the client area:
 2.  Copy the `SSO_SECRET` from your Pterodactyl configuration.
 3.  Paste it into the **SSO Secret** field in the FOSSBilling Pterodactyl module settings.
 
-## 🌍 Translations
-
-The module automatically detects the user's language setting in FOSSBilling. Currently supported:
-
-- English (en_US)
-- Spanish (es_ES)
-- Portuguese (pt_PT, pt_BR)
-
 ## 🤝 Support & Contributing
 
 This module is a complete rework aimed at stability and feature parity with modern hosting needs.
