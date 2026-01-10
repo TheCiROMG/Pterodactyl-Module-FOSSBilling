@@ -1,0 +1,152 @@
+{% import 'macro_functions.html.twig' as mf %}
+
+{% set service = admin.order_service({ "id": order.id }) %}
+
+<div class="card-body overflow-auto">
+    <h3>{{ 'Details'|trans }}</h3>
+    <table class="table card-table table-vcenter table-striped text-nowrap">
+        <tbody>
+            <tr>
+                <td class="text-end">{{ 'Status'|trans }}:</td>
+                <td>
+                    <span class="badge {% if service.status == 'active' %}bg-success{% elseif service.status == 'suspended' %}bg-warning{% else %}bg-danger{% endif %}">
+                        {{ service.status|trans }}
+                    </span>
+                </td>
+            </tr>
+            <tr>
+                <td class="text-end">{{ 'Server ID'|trans }}:</td>
+                <td>{{ service.server_identifier ?? 'Not provisioned' }}</td>
+            </tr>
+            {% if service.panel_url %}
+            <tr>
+                <td class="text-end">{{ 'Panel Access'|trans }}:</td>
+                <td>
+                    <a href="{{ service.panel_url }}" target="_blank" class="btn btn-primary btn-sm">
+                        <svg class="icon" width="16" height="16">
+                            <use xlink:href="#external-link" />
+                        </svg>
+                        {{ 'Access Panel'|trans }}
+                    </a>
+                </td>
+            </tr>
+            {% endif %}
+        </tbody>
+    </table>
+</div>
+
+<div class="card-footer text-center">
+    {{ order_actions }}
+    
+    <a class="btn btn-success api-link"
+        href="{{ 'api/admin/servicepterodactyl/provision'|link({ 'order_id': order.id, 'CSRFToken': CSRFToken }) }}"
+        data-api-confirm="{{ 'Are you sure you want to provision this service?'|trans }}"
+        data-api-reload="1">
+        <svg class="icon" width="24" height="24">
+            <use xlink:href="#check" />
+        </svg>
+        <span>{{ 'Provision'|trans }}</span>
+    </a>
+    
+    <a class="btn btn-warning api-link"
+        href="{{ 'api/admin/servicepterodactyl/suspend'|link({ 'order_id': order.id, 'CSRFToken': CSRFToken }) }}"
+        data-api-confirm="{{ 'Are you sure you want to suspend this service?'|trans }}"
+        data-api-reload="1">
+        <svg class="icon" width="24" height="24">
+            <use xlink:href="#pause" />
+        </svg>
+        <span>{{ 'Suspend'|trans }}</span>
+    </a>
+    
+    <a class="btn btn-danger api-link"
+        href="{{ 'api/admin/servicepterodactyl/unprovision'|link({ 'order_id': order.id, 'CSRFToken': CSRFToken }) }}"
+        data-api-confirm="{{ 'Are you sure you want to unprovision this service?'|trans }}"
+        data-api-reload="1">
+        <svg class="icon" width="24" height="24">
+            <use xlink:href="#trash" />
+        </svg>
+        <span>{{ 'Unprovision'|trans }}</span>
+    </a>
+    
+    <a class="btn btn-primary api-link"
+        href="{{ 'api/admin/servicepterodactyl/reset'|link({ 'order_id': order.id, 'CSRFToken': CSRFToken }) }}"
+        data-api-confirm="{{ 'Are you sure?'|trans }}"
+        data-api-reload="1">
+        <svg class="icon" width="24" height="24">
+            <use xlink:href="#refresh" />
+        </svg>
+        <span>{{ 'Restart Server'|trans }}</span>
+    </a>
+</div>
+
+<div class="card-body">
+    <h2>{{ 'Server configuration'|trans }}</h2>
+    <p>{{ 'Update the server limits. These changes will be applied immediately.'|trans }}</p>
+
+    <form action="{{ 'api/admin/servicepterodactyl/update'|link }}" method="post" class="api-form" data-api-msg="{{ 'Server updated'|trans }}">
+        <input type="hidden" name="CSRFToken" value="{{ CSRFToken }}"/>
+        
+        <h2>{{ 'Resource Limits'|trans }}</h2>
+        <div class="mb-3 row">
+            <label class="form-label col-3 col-form-label">{{ 'Memory (MB)'|trans }}:</label>
+            <div class="col">
+                <input type="number" class="form-control" name="config[memory]" value="{{ service.config.memory }}">
+            </div>
+        </div>
+        
+        <div class="mb-3 row">
+            <label class="form-label col-3 col-form-label">{{ 'Swap (MB)'|trans }}:</label>
+            <div class="col">
+                <input type="number" class="form-control" name="config[swap]" value="{{ service.config.swap }}">
+            </div>
+        </div>
+        
+        <div class="mb-3 row">
+            <label class="form-label col-3 col-form-label">{{ 'Disk (MB)'|trans }}:</label>
+            <div class="col">
+                <input type="number" class="form-control" name="config[disk]" value="{{ service.config.disk }}">
+            </div>
+        </div>
+        
+        <div class="mb-3 row">
+            <label class="form-label col-3 col-form-label">{{ 'CPU (%)'|trans }}:</label>
+            <div class="col">
+                <input type="number" class="form-control" name="config[cpu]" value="{{ service.config.cpu }}">
+            </div>
+        </div>
+        
+        <div class="mb-3 row">
+            <label class="form-label col-3 col-form-label">{{ 'I/O Weight'|trans }}:</label>
+            <div class="col">
+                <input type="number" class="form-control" name="config[io]" value="{{ service.config.io }}">
+            </div>
+        </div>
+
+        <hr>
+
+        <h2>{{ 'Feature Limits'|trans }}</h2>
+        <div class="mb-3 row">
+            <label class="form-label col-3 col-form-label">{{ 'Databases'|trans }}:</label>
+            <div class="col">
+                <input type="number" class="form-control" name="config[databases]" value="{{ service.config.databases }}">
+            </div>
+        </div>
+        
+        <div class="mb-3 row">
+            <label class="form-label col-3 col-form-label">{{ 'Allocations'|trans }}:</label>
+            <div class="col">
+                <input type="number" class="form-control" name="config[allocations]" value="{{ service.config.allocations }}">
+            </div>
+        </div>
+        
+        <div class="mb-3 row">
+            <label class="form-label col-3 col-form-label">{{ 'Backups'|trans }}:</label>
+            <div class="col">
+                <input type="number" class="form-control" name="config[backups]" value="{{ service.config.backups }}">
+            </div>
+        </div>
+
+        <input type="hidden" name="order_id" value="{{ order.id }}">
+        <input type="submit" value="{{ 'Update'|trans }}" class="btn btn-primary w-100">
+    </form>
+</div>

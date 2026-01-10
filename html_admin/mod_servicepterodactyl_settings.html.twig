@@ -1,0 +1,251 @@
+{% extends request.ajax ? "layout_blank.html.twig" : "layout_default.html.twig" %}
+{% import "macro_functions.html.twig" as mf %}
+
+{% set settings = admin.servicepterodactyl_get_settings() %}
+
+{% block meta_title %}
+    {{ 'Pterodactyl Global Settings'|trans }}
+{% endblock %}
+
+{% set active_menu = 'system' %}
+
+{% block breadcrumbs %}
+    <ul class="breadcrumb">
+        <li class="breadcrumb-item">
+            <a href="{{ '/'|alink }}">
+                <svg class="icon">
+                    <use xlink:href="#home"/>
+                </svg>
+            </a>
+        </li>
+        <li class="breadcrumb-item">
+            <a href="{{ 'system'|alink }}">
+                {{ 'Settings'|trans }}
+            </a>
+        </li>
+        <li class="breadcrumb-item active" aria-current="page">
+            {{ 'Pterodactyl Global Settings'|trans }}
+        </li>
+    </ul>
+{% endblock %}
+
+{% block content %}
+    <div class="card-tabs">
+        <ul class="nav nav-tabs" role="tablist">
+            <li class="nav-item" role="presentation">
+                <a class="nav-link active" href="#tab-general" data-bs-toggle="tab">{{ 'General'|trans }}</a>
+            </li>
+            <li class="nav-item" role="presentation">
+                <a class="nav-link" href="#tab-debug" data-bs-toggle="tab">{{ 'Debug'|trans }}</a>
+            </li>
+             <li class="nav-item" role="presentation">
+                <a class="nav-link" href="#tab-help" data-bs-toggle="tab">{{ 'Help & Instructions'|trans }}</a>
+            </li>
+        </ul>
+
+        <div class="card">
+            <div class="tab-content">
+                <div class="tab-pane fade show active" id="tab-general" role="tabpanel">
+                    <form method="post" action="{{ 'api/admin/servicepterodactyl/save_settings'|link }}" class="api-form save" data-api-msg="{{ 'Settings saved successfully'|trans }}">
+                        <input type="hidden" name="CSRFToken" value="{{ CSRFToken }}"/>
+                        
+                        <div class="card-body">
+                            <h2>{{ 'Panel Connection'|trans }}</h2>
+                            <div class="mb-3 row">
+                                <label class="form-label col-3 col-form-label">{{ 'Panel URL'|trans }}:</label>
+                                <div class="col">
+                                    <input type="url" class="form-control" name="panel_url" value="{{ settings.panel_url|default('') }}" placeholder="https://panel.example.com">
+                                    <div class="form-text">{{ 'The URL of your Pterodactyl panel'|trans }}</div>
+                                </div>
+                            </div>
+                            
+                            <div class="mb-3 row">
+                                <label class="form-label col-3 col-form-label">{{ 'API Key'|trans }}:</label>
+                                <div class="col">
+                                    <input type="password" class="form-control" name="api_key" value="{{ settings.api_key|default('') }}" placeholder="ptla_...">
+                                    <div class="form-text">{{ 'Application API key from Pterodactyl panel'|trans }}</div>
+                                </div>
+                            </div>
+
+                            <div class="mb-3 row">
+                                <label class="form-label col-3 col-form-label">{{ 'SSO Secret'|trans }}:</label>
+                                <div class="col">
+                                    <input type="password" class="form-control" name="sso_secret" value="{{ settings.sso_secret|default('') }}" placeholder="">
+                                    <div class="form-text">{{ 'Secret key for WemX SSO plugin. Required for "Login to Panel" button.'|trans }}</div>
+                                </div>
+                            </div>
+
+                            <hr>
+
+                            <h2>{{ 'Allowed Nodes'|trans }}</h2>
+                            {% set nodes = admin.servicepterodactyl_get_nodes() %}
+                            
+                            <div class="mb-3 row">
+                                <label class="form-label col-3 col-form-label">{{ 'Select Nodes'|trans }}:</label>
+                                <div class="col">
+                                    {% if nodes %}
+                                        {% for node in nodes %}
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="checkbox" name="allowed_nodes[]" value="{{ node.id }}" id="node_{{ node.id }}" {% if node.id in settings.allowed_nodes %}checked{% endif %}>
+                                                <label class="form-check-label" for="node_{{ node.id }}">
+                                                    {{ node.name }} (ID: {{ node.id }})
+                                                </label>
+                                            </div>
+                                        {% endfor %}
+                                        <div class="form-text">{{ 'Select the nodes that can be used by products.'|trans }}</div>
+                                    {% else %}
+                                        <div class="alert alert-warning">
+                                            {{ 'No nodes found. Please ensure your Panel URL and API Key are correct and save settings.'|trans }}
+                                        </div>
+                                    {% endif %}
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="card-footer text-end">
+                            <button class="btn btn-primary" type="submit">{{ 'Save Settings'|trans }}</button>
+                        </div>
+                    </form>
+                </div>
+
+                <div class="tab-pane fade" id="tab-debug" role="tabpanel">
+                    <div class="card-body">
+                        <h2>{{ 'Debug Tools'|trans }}</h2>
+                        <p class="text-muted">{{ 'Use this tool to verify the connection to your Pterodactyl panel and check node status.'|trans }}</p>
+                        
+                        <button class="btn btn-info mb-3" type="button" id="btn-test-connection">
+                            <svg class="icon">
+                                <use xlink:href="#refresh"/>
+                            </svg>
+                            {{ 'Test Connection'|trans }}
+                        </button>
+                        
+                        <div id="debug-results" style="display:none;">
+                            <h3>{{ 'Connection Results'|trans }}</h3>
+                            <div class="alert" id="debug-status-alert"></div>
+                            
+                            <table class="table table-bordered">
+                                <tbody>
+                                    <tr>
+                                        <td>{{ 'PHP Version'|trans }}</td>
+                                        <td id="debug-php-version"></td>
+                                    </tr>
+                                    <tr>
+                                        <td>{{ 'cURL Enabled'|trans }}</td>
+                                        <td id="debug-curl"></td>
+                                    </tr>
+                                    <tr>
+                                        <td>{{ 'Latency'|trans }}</td>
+                                        <td id="debug-latency"></td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                            
+                            <h3>{{ 'Node Status'|trans }}</h3>
+                            <table class="table table-striped" id="debug-nodes-table">
+                                <thead>
+                                    <tr>
+                                        <th>{{ 'Name'|trans }}</th>
+                                        <th>{{ 'FQDN'|trans }}</th>
+                                        <th>{{ 'Port'|trans }}</th>
+                                        <th>{{ 'Maintenance'|trans }}</th>
+                                        <th>{{ 'Scheme'|trans }}</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="tab-pane fade" id="tab-help" role="tabpanel">
+                    <div class="card-body">
+                         <h2>{{ 'Configuration Instructions'|trans }}</h2>
+                         
+                         <h3>{{ '1. API Key'|trans }}</h3>
+                         <p>{{ 'To get your API key, go to your Pterodactyl Panel Admin Area -> Application API. Create a new key with Read/Write permissions for Users, Nodes, Servers, Allocations, Nests and Eggs.'|trans }}</p>
+                         
+                         <h3>{{ '2. Product Setup'|trans }}</h3>
+                         <p>{{ 'After configuring the module settings here:'|trans }}</p>
+                         <ul>
+                             <li>{{ 'Go to Products & Services -> Your Product -> Configuration'|trans }}</li>
+                             <li>{{ 'Select the Pterodactyl service'|trans }}</li>
+                             <li>{{ 'Choose the deployment type (Specific Node or Location)'|trans }}</li>
+                             <li>{{ 'Configure resources (Memory, Disk, CPU, etc.) directly in the product config'|trans }}</li>
+                         </ul>
+                         
+                         <h3>{{ '3. Features'|trans }}</h3>
+                         <dl>
+                             <dt>{{ 'Allowed Nodes'|trans }}</dt>
+                             <dd>{{ 'Select which nodes are available for use in FOSSBilling. Only checked nodes will appear in product configuration.'|trans }}</dd>
+                             
+                             <dt>{{ 'Client Node Selection'|trans }}</dt>
+                             <dd>{{ 'In product configuration, you can enable "Client Selection". This allows customers to choose their preferred node from the list of allowed nodes during checkout.'|trans }}</dd>
+                             
+                             <dt>{{ 'Auto Port'|trans }}</dt>
+                             <dd>{{ 'If enabled, the system will automatically find a free port on the selected node and assign it to the server. Useful for game servers.'|trans }}</dd>
+                         </dl>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        document.getElementById('btn-test-connection').addEventListener('click', function() {
+            var btn = this;
+            var resultsDiv = document.getElementById('debug-results');
+            var alertDiv = document.getElementById('debug-status-alert');
+            var nodesTable = document.getElementById('debug-nodes-table').getElementsByTagName('tbody')[0];
+            
+            // Reset UI
+            btn.disabled = true;
+            btn.innerHTML = '{{ "Testing..."|trans }}';
+            resultsDiv.style.display = 'none';
+            nodesTable.innerHTML = '';
+            
+            API.admin.post('servicepterodactyl/test_connection', {}, function(response) {
+                btn.disabled = false;
+                btn.innerHTML = '<svg class="icon"><use xlink:href="#refresh"/></svg> {{ "Test Connection"|trans }}';
+                resultsDiv.style.display = 'block';
+                
+                if (response.success) {
+                    alertDiv.className = 'alert alert-success';
+                    alertDiv.innerHTML = '<strong>{{ "Success!"|trans }}</strong> ' + response.message;
+                } else {
+                    alertDiv.className = 'alert alert-danger';
+                    alertDiv.innerHTML = '<strong>{{ "Error!"|trans }}</strong> ' + response.message;
+                }
+                
+                document.getElementById('debug-php-version').textContent = response.php_version;
+                document.getElementById('debug-curl').innerHTML = response.curl_enabled ? '<span class="badge bg-success">{{ "Yes"|trans }}</span>' : '<span class="badge bg-danger">{{ "No"|trans }}</span>';
+                document.getElementById('debug-latency').textContent = response.latency || '-';
+                
+                if (response.nodes && response.nodes.length > 0) {
+                    response.nodes.forEach(function(node) {
+                        var row = nodesTable.insertRow();
+                        row.insertCell(0).textContent = node.name;
+                        row.insertCell(1).textContent = node.fqdn;
+                        row.insertCell(2).textContent = node.port;
+                        
+                        var maintCell = row.insertCell(3);
+                        maintCell.innerHTML = node.maintenance ? '<span class="badge bg-warning">{{ "Yes"|trans }}</span>' : '<span class="badge bg-success">{{ "No"|trans }}</span>';
+                        
+                        row.insertCell(4).textContent = node.scheme;
+                    });
+                } else {
+                     var row = nodesTable.insertRow();
+                     var cell = row.insertCell(0);
+                     cell.colSpan = 5;
+                     cell.className = 'text-center text-muted';
+                     cell.textContent = '{{ "No nodes found or connection failed."|trans }}';
+                }
+            }, function(error) {
+                btn.disabled = false;
+                btn.innerHTML = '<svg class="icon"><use xlink:href="#refresh"/></svg> {{ "Test Connection"|trans }}';
+                alert('Request failed: ' + error.message);
+            });
+        });
+    </script>
+{% endblock %}
