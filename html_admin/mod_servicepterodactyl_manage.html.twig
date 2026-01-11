@@ -9,8 +9,8 @@
             <tr>
                 <td class="text-end">{{ 'Status'|trans }}:</td>
                 <td>
-                    <span class="badge {% if service.status == 'active' %}bg-success{% elseif service.status == 'suspended' %}bg-warning{% else %}bg-danger{% endif %}">
-                        {{ service.status|trans }}
+                    <span class="badge {% if service.status == 'active' %}bg-success{% elseif service.status == 'suspended' %}bg-warning{% else %}bg-secondary{% endif %}">
+                        {{ service.status|default('Pending')|trans }}
                     </span>
                 </td>
             </tr>

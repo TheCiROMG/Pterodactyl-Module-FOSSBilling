@@ -20,6 +20,8 @@ A complete, feature-rich Pterodactyl integration for FOSSBilling. This module al
   - **Startup Commands**: Customize startup commands.
   - **CPU Pinning & OOM Killer**: Toggle advanced Pterodactyl features.
 - **🔌 Auto-Port Allocation**: Automatically assign free ports to server variables using the `AUTO_PORT` placeholder.
+- **🔑 Auto-Password Generation**: Automatically generate secure random passwords for variables using `AUTO_PASSWORD`.
+- **🏷️ Custom Server Naming**: Define server naming patterns using client variables (e.g., `Server - {{ client.first_name }}`).
 - **📊 Resource Management**: Set limits for CPU, RAM, Disk, Swap, IO, Databases, Backups, and Allocations.
 - **🌐 Internationalization**: Native support for multiple languages (English, Spanish, Portuguese).
 
@@ -50,22 +52,35 @@ When creating or editing a product in FOSSBilling:
 2.  Go to the **Configuration** tab.
 3.  **Deployment Settings**:
     - Choose **Specific Node** or **Location (Auto-Selection)**.
-    - If **Specific Node**:
-      - **Single Node**: Force all servers to one node.
 4.  **Egg Settings**: 
     - Select the **Nest** and **Egg**. 
-    - The module will automatically load the Egg's environment variables below.
-    - **Admin Values**: You define the default values for these variables here.
-5.  **Resources**: Configure RAM, Disk, CPU, etc.
-6.  **Feature Limits**: Set limits for databases, backups, etc.
+    - The module will automatically load the Egg's environment variables.
+5.  **Resources & Limits**: 
+    - Configure RAM, Disk, CPU, Swap, and IO.
+    - **Feature Limits**: Set dedicated limits for **Databases**, **Allocations**, and **Backups**.
 
-### 🔌 Auto-Port Allocation (How it works)
+### 🪄 Special Features
+
+#### 🔌 Auto-Port Allocation
 You can automatically assign a free port to any server variable (like `SERVER_PORT` or `QUERY_PORT`).
+- Set the variable value to: `AUTO_PORT`
+- The module will find a free port on the node and replace it during installation.
 
-1.  In the **Product Configuration** > **Egg Settings**.
-2.  Find the variable you want to auto-assign (e.g., `SERVER_PORT`).
-3.  Set its value to: `AUTO_PORT`
-4.  When a server is deployed, the module will find a free port on the node and replace `AUTO_PORT` with the actual port number.
+#### 🔑 Auto-Password Generation
+To generate a random secure password for variables like `RCON_PASSWORD` or `ADMIN_PASSWORD`:
+- Set the variable value to: `AUTO_PASSWORD` or `RANDOM_STRING`
+- The module will generate a 16-character secure string.
+
+#### 🏷️ Server Name Pattern
+You can customize how servers are named on Pterodactyl.
+- **Field**: Server Name Pattern
+- **Variables**:
+  - `{{ client.id }}`
+  - `{{ client.first_name }}`
+  - `{{ client.last_name }}`
+  - `{{ service.id }}`
+  - `{{ date }}`
+- **Example**: `{{ product.title }} - {{ client.first_name }}`
 
 ## 👤 Client Experience
 
@@ -75,7 +90,7 @@ The client area has been streamlined to focus on access rather than management, 
 - **Direct Access**: 
   - **Access Panel**: Link to the Pterodactyl server page.
   - **Login (SSO)**: One-click login (if configured).
-- **Management**: Password changes, file management, and console access are handled exclusively on Pterodactyl.
+- **No Variables Exposed**: Clients cannot see or edit server variables from FOSSBilling; this is handled entirely by admins or auto-generated.
 
 ## 🔑 SSO Setup (Optional)
 

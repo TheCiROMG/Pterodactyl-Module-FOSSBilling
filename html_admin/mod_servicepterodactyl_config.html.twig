@@ -97,9 +97,23 @@
                 <div class="col">
                     {% if eggs %}
                     <select class="form-select" name="config[egg_id]">
+                        <option value="">{{ 'Select Egg'|trans }}</option>
+                        {% set current_nest = "init_null_value" %}
                         {% for egg in eggs %}
-                        <option value="{{ egg.id }}" {% if product.config.egg_id == egg.id %}selected{% endif %}>{{ egg.nest_name }} - {{ egg.name }} (ID: {{ egg.id }})</option>
+                            {% if current_nest != egg.nest_name %}
+                                {% if current_nest != "init_null_value" %}
+                                    </optgroup>
+                                {% endif %}
+                                <optgroup label="{{ egg.nest_name }}">
+                                {% set current_nest = egg.nest_name %}
+                            {% endif %}
+                            <option value="{{ egg.id }}" {% if product.config.egg_id == egg.id %}selected{% endif %}>
+                                {{ egg.name }} (ID: {{ egg.id }})
+                            </option>
                         {% endfor %}
+                        {% if current_nest != "init_null_value" %}
+                            </optgroup>
+                        {% endif %}
                     </select>
                     {% else %}
                     <input type="number" class="form-control" name="config[egg_id]" value="{{ product.config.egg_id|default(1) }}">
@@ -230,7 +244,8 @@
                     }
                 });
 
-                function loadEggVariables() {
+                function loadEggVariables(event) {
+                    const isChange = (event && event.type === 'change');
                     const eggId = document.querySelector('select[name="config[egg_id]"]').value;
                     const container = document.getElementById('egg_variables_container');
                     
@@ -265,8 +280,11 @@
                                 dockerContainer.insertAdjacentHTML('beforeend', dockerHtml);
                             }
                             
-                            if (response.docker_image && !dockerInput.value) {
+                            if (response.docker_image) {
                                 dockerInput.placeholder = response.docker_image;
+                                if (isChange) {
+                                    dockerInput.value = '';
+                                }
                             }
 
                             // Startup Command
@@ -274,8 +292,8 @@
                             if (startupInput) {
                                 if (response.startup) {
                                     startupInput.placeholder = response.startup;
-                                    if (!startupInput.value) {
-                                        startupInput.value = response.startup;
+                                    if (isChange) {
+                                        startupInput.value = '';
                                     }
                                 }
                             }
@@ -315,6 +333,7 @@
                                             <div class="input-group">
                                                 <input type="text" class="form-control" name="${fieldName}" value="${value}" ${required} placeholder="${v.default_value}">
                                             </div>
+                                            <div class="form-text text-muted">Use <code>AUTO_PORT</code> for automatic port assignment or <code>AUTO_PASSWORD</code> to generate a random password.</div>
                                             ${description}
                                         </div>
                                     </div>
@@ -336,16 +355,34 @@
 
             <h2>{{ 'Feature Limits'|trans }}</h2>
             <div class="mb-3 row">
-                <label class="form-label col-3 col-form-label">{{ 'Databases'|trans }}:</label>
+                <label class="form-label col-3 col-form-label">{{ 'Server Name Pattern'|trans }}:</label>
                 <div class="col">
-                    <input type="number" class="form-control" name="config[databases]" value="{{ product.config.databases|default(0) }}">
+                    <input type="text" class="form-control" name="config[server_name_pattern]" value="{{ product.config.server_name_pattern }}" placeholder="{{ '{{ product.title }} - {{ client.first_name }}'|trans }}">
+                    <div class="form-text">{{ 'Variables: {{ client.id }}, {{ client.first_name }}, {{ client.last_name }}, {{ service.id }}, {{ date }}'|trans }}</div>
+                </div>
+            </div>
+            <div class="mb-3 row">
+                <label class="form-label col-3 col-form-label">{{ 'Server Description'|trans }}:</label>
+                <div class="col">
+                    <input type="text" class="form-control" name="config[server_description]" value="{{ product.config.server_description }}" placeholder="{{ 'Hosted by FOSSBilling'|trans }}">
                 </div>
             </div>
             
             <div class="mb-3 row">
+                <label class="form-label col-3 col-form-label">{{ 'Dedicated IP'|trans }}:</label>
+                <div class="col">
+                    <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" name="config[dedicated_ip]" value="1" id="dedicated_ip" {% if product.config.dedicated_ip %}checked{% endif %}>
+                        <label class="form-check-label" for="dedicated_ip">{{ 'Try to allocate default port (e.g. 25565) or specific IP'|trans }}</label>
+                    </div>
+                </div>
+            </div>
+
+            <div class="mb-3 row">
                 <label class="form-label col-3 col-form-label">{{ 'Allocations'|trans }}:</label>
                 <div class="col">
                     <input type="number" class="form-control" name="config[allocations]" value="{{ product.config.allocations|default(0) }}">
+                    <div class="form-text">{{ 'Number of additional ports allowed (0 for none)'|trans }}</div>
                 </div>
             </div>
 
@@ -353,6 +390,15 @@
                 <label class="form-label col-3 col-form-label">{{ 'Backups'|trans }}:</label>
                 <div class="col">
                     <input type="number" class="form-control" name="config[backups]" value="{{ product.config.backups|default(0) }}">
+                    <div class="form-text">{{ 'Number of backups allowed (0 for none)'|trans }}</div>
+                </div>
+            </div>
+
+            <div class="mb-3 row">
+                <label class="form-label col-3 col-form-label">{{ 'Databases'|trans }}:</label>
+                <div class="col">
+                    <input type="number" class="form-control" name="config[databases]" value="{{ product.config.databases|default(0) }}">
+                    <div class="form-text">{{ 'Number of databases allowed (0 for none)'|trans }}</div>
                 </div>
             </div>
 

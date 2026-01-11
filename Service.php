@@ -12,7 +12,6 @@
 namespace Box\Mod\Servicepterodactyl;
 
 use FOSSBilling\InjectionAwareInterface;
-use RedBeanPHP\OODBBean;
 
 class Service implements InjectionAwareInterface
 {
@@ -37,28 +36,180 @@ class Service implements InjectionAwareInterface
         // We do NOT throw exceptions here to allow "Plug and Play" ordering even if the theme doesn't support custom fields.
         // The user can configure variables in the Client Area after purchase.
         
+        // Merge product config with submitted data (submitted data overrides product defaults)
         return array_merge($config, $data);
     }
-
-    public function create(OODBBean $order)
+    
+    /**
+     * Hook called after order is created.
+     * Use this to ensure the service record exists if the create method wasn't called or failed silently.
+     */
+    public static function onAfterClientOrderCreate(\Box_Event $event)
     {
-        $model = $this->di['db']->dispense('service_pterodactyl');
-        $model->client_id = $order->client_id;
-        $model->config = $order->config;
-
-        $model->created_at = date('Y-m-d H:i:s');
-        $model->updated_at = date('Y-m-d H:i:s');
-        $this->di['db']->store($model);
-
-        return $model;
+        self::_createServiceRecord($event);
     }
 
-    public function activate(OODBBean $order, OODBBean $model): bool
+    /**
+     * Hook called after admin creates an order.
+     */
+    public static function onAfterAdminOrderCreate(\Box_Event $event)
+    {
+        self::_createServiceRecord($event);
+    }
+
+    /**
+     * Hook called after admin updates an order.
+     * Use this to sync service status with order status if changed manually.
+     */
+    public static function onAfterAdminOrderUpdate(\Box_Event $event)
+    {
+        $di = $event->getDi();
+        $params = $event->getParameters();
+        $orderId = $params['id'];
+        
+        try {
+            $order = $di['db']->load('client_order', $orderId);
+            if (!$order) {
+                return;
+            }
+            
+            // Only process if this is a Pterodactyl service order
+            $product = $di['db']->load('product', $order->product_id);
+            if (!$product || $product->type !== 'pterodactyl') {
+                return;
+            }
+            
+            if (!$order->service_id) {
+                return;
+            }
+
+            $service = $di['db']->findOne('service_pterodactyl', 'id = ?', [$order->service_id]);
+            if (!$service) {
+                return;
+            }
+
+            // Sync status from order to service if they differ
+            // We do NOT trigger provision/suspend/cancel logic here to avoid double-actions or side effects
+            // This is purely to ensure the DB status matches the Order status for display/consistency
+            if ($service->status !== $order->status) {
+                $service->status = $order->status;
+                $service->updated_at = date('Y-m-d H:i:s');
+                $di['db']->store($service);
+            }
+            
+        } catch (\Exception $e) {
+            error_log('Error in onAfterAdminOrderUpdate for Pterodactyl: ' . $e->getMessage());
+        }
+    }
+
+    private static function _createServiceRecord(\Box_Event $event)
+    {
+        $di = $event->getDi();
+        $params = $event->getParameters();
+        $orderId = $params['id'];
+        
+        try {
+            $order = $di['db']->load('client_order', $orderId);
+            if (!$order) {
+                return;
+            }
+            
+            // Only process if this is a Pterodactyl service order
+            $product = $di['db']->load('product', $order->product_id);
+            if (!$product || $product->type !== 'pterodactyl') {
+                return;
+            }
+            
+            // Check if service record already exists
+            // Note: service_id might be null or 0 if not yet assigned
+            if ($order->service_id) {
+                $service = $di['db']->findOne('service_pterodactyl', 'id = ?', [$order->service_id]);
+                if ($service) {
+                    return;
+                }
+            }
+            
+            // If not exists, create it manually
+            $service = $di['mod_service']('servicepterodactyl');
+            // Ensure create receives the order object
+            $model = $service->create($order);
+            
+            // Update order with new service ID if needed
+            if ($model && !$order->service_id) {
+                $order->service_id = $model->id;
+                $di['db']->store($order);
+            }
+            
+        } catch (\Exception $e) {
+            error_log('Error in _createServiceRecord for Pterodactyl: ' . $e->getMessage());
+        }
+    }
+
+    public function create($order)
+    {
+        // Debug log
+        $logFile = __DIR__ . '/service_log.txt';
+        $logMsg = date('Y-m-d H:i:s') . " - Create called for Order ID: " . ($order->id ?? 'unknown') . "\n";
+        
+        try {
+            // Ensure config is not empty
+            $orderConfig = json_decode($order->config, true);
+            if (!is_array($orderConfig)) {
+                $orderConfig = [];
+            }
+            
+            $logMsg .= "Initial Order Config: " . json_encode($orderConfig) . "\n";
+
+            // If product_id exists, merge with product config
+            if (isset($order->product_id)) {
+                $product = $this->di['db']->load('product', $order->product_id);
+                if ($product && !empty($product->config)) {
+                    $productConfig = json_decode($product->config, true);
+                    if (is_array($productConfig)) {
+                        // Product config defaults, overwritten by order config
+                        $orderConfig = array_merge($productConfig, $orderConfig);
+                        $logMsg .= "Merged Product Config. New keys: " . implode(',', array_keys($orderConfig)) . "\n";
+                    }
+                }
+            }
+
+            $model = $this->di['db']->dispense('service_pterodactyl');
+            $model->client_id = $order->client_id;
+            $model->config = json_encode($orderConfig);
+            $model->created_at = date('Y-m-d H:i:s');
+            $model->updated_at = date('Y-m-d H:i:s');
+            $model->server_id = null;
+            $model->server_identifier = null;
+            $model->status = 'pending';
+
+            $id = $this->di['db']->store($model);
+            $logMsg .= "Stored model. ID: " . $id . "\n";
+
+            file_put_contents($logFile, $logMsg, FILE_APPEND);
+            return $model;
+
+        } catch (\Exception $e) {
+            $errorMsg = "ERROR in create: " . $e->getMessage() . "\n" . $e->getTraceAsString() . "\n";
+            file_put_contents($logFile, $logMsg . $errorMsg, FILE_APPEND);
+            error_log($errorMsg);
+            throw new \FOSSBilling\Exception('Failed to create service record: ' . $e->getMessage());
+        }
+    }
+    
+    /**
+     * Validate order config before creation
+     */
+    public function validate_config(array $config): bool
+    {
+        return true;
+    }
+
+    public function activate($order, $model): bool
     {
         return $this->provision($order, $model);
     }
 
-    public function provision(OODBBean $order, OODBBean $model): bool
+    public function provision($order, $model): bool
     {
         $config = json_decode($order->config, 1);
         if (!is_object($model)) {
@@ -73,7 +224,7 @@ class Service implements InjectionAwareInterface
             if (!$client) {
                 throw new \FOSSBilling\Exception('Client not found');
             }
-            $serverData = $this->createPterodactylServer($config, $client);
+            $serverData = $this->createPterodactylServer($config, $client, $model, $order);
             
             $model->server_id = $serverData['id'];
             $model->server_identifier = $serverData['identifier'];
@@ -87,7 +238,7 @@ class Service implements InjectionAwareInterface
         }
     }
 
-    public function suspend(OODBBean $order, OODBBean $model): bool
+    public function suspend($order, $model): bool
     {
         try {
             $config = json_decode($order->config, 1);
@@ -107,7 +258,7 @@ class Service implements InjectionAwareInterface
         }
     }
 
-    public function unsuspend(OODBBean $order, OODBBean $model): bool
+    public function unsuspend($order, $model): bool
     {
         try {
             $config = json_decode($order->config, 1);
@@ -127,22 +278,27 @@ class Service implements InjectionAwareInterface
         }
     }
 
-    public function cancel(OODBBean $order, OODBBean $model): bool
+    public function cancel($order, $model): bool
     {
         return $this->suspend($order, $model);
     }
 
-    public function uncancel(OODBBean $order, OODBBean $model): bool
+    public function uncancel($order, $model): bool
     {
         return $this->unsuspend($order, $model);
     }
 
-    public function delete(?OODBBean $order, ?OODBBean $model): void
+    public function renew($order, $model): bool
+    {
+        return true;
+    }
+
+    public function delete($order, $model): void
     {
         $this->unprovision($order, $model);
     }
 
-    public function unprovision(?OODBBean $order, ?OODBBean $model): void
+    public function unprovision($order, $model): void
     {
         if (is_object($model)) {
             try {
@@ -170,7 +326,7 @@ class Service implements InjectionAwareInterface
         }
     }
 
-    public function toApiArray(OODBBean $model): array
+    public function toApiArray($model): array
     {
         $result = [
             'id' => $model->id,
@@ -206,7 +362,7 @@ class Service implements InjectionAwareInterface
             `id` bigint(20) NOT NULL AUTO_INCREMENT UNIQUE,
             `client_id` bigint(20) NOT NULL,
             `server_id` bigint(20),
-            `server_identifier` varchar(8),
+            `server_identifier` varchar(36),
             `status` varchar(50) DEFAULT "pending",
             `config` text NOT NULL,
             `created_at` datetime,
@@ -223,7 +379,8 @@ class Service implements InjectionAwareInterface
      */
     public function uninstall(): bool
     {
-        $this->di['db']->exec('DROP TABLE IF EXISTS `service_pterodactyl`');
+        // We do NOT drop the table on uninstall to prevent data loss if the module is accidentally uninstalled.
+        // $this->di['db']->exec('DROP TABLE IF EXISTS `service_pterodactyl`');
 
         return true;
     }
@@ -412,7 +569,7 @@ class Service implements InjectionAwareInterface
     /**
      * Create Pterodactyl server using allocation or deployment
      */
-    private function createPterodactylServer(array $config, OODBBean $client): array
+    private function createPterodactylServer(array $config, $client, $model, $order): array
     {
         $panelConfig = $this->panelConfig ?? $this->getPanelConfig($config);
         
@@ -429,12 +586,21 @@ class Service implements InjectionAwareInterface
         $eggInfo = $this->getEggInfo($eggId);
         $environment = $this->prepareEnvironmentVariables($eggInfo, $config);
         
+        // Determine Server Name
+        $serverName = $config['server_name'] ?? 'Server-' . time();
+        
+        // Use pattern if available, or default to "Product Title - Client First Name Client Last Name"
+        $pattern = $config['server_name_pattern'] ?? '{{ product.title }} - {{ client.first_name }} {{ client.last_name }}';
+        if (!empty($pattern)) {
+            $serverName = $this->parseVariables($pattern, $client, $model->id, $order);
+        }
+
         $serverData = [
-            'name' => $config['server_name'] ?? 'Server-' . time(),
+            'name' => $serverName,
             'user' => $userId,
             'egg' => $eggId,
-            'docker_image' => $config['docker_image'] ?? $eggInfo['docker_image'],
-            'startup' => $config['startup_command'] ?? $eggInfo['startup'],
+            'docker_image' => !empty($config['docker_image']) ? $config['docker_image'] : $eggInfo['docker_image'],
+            'startup' => !empty($config['startup_command']) ? $config['startup_command'] : $eggInfo['startup'],
             'environment' => $environment,
             'limits' => [
                 'memory' => (int)($config['memory'] ?? 512),
@@ -449,6 +615,10 @@ class Service implements InjectionAwareInterface
                 'backups' => (int)($config['backups'] ?? 0),
             ],
         ];
+
+        if (!empty($config['server_description'])) {
+            $serverData['description'] = $config['server_description'];
+        }
 
         // Add CPU Pinning and OOM Killer toggle
         if (!empty($config['cpu_pinning'])) {
@@ -635,7 +805,7 @@ class Service implements InjectionAwareInterface
     /**
      * Get or create a user on Pterodactyl panel
      */
-    private function getOrCreateUser(string $email, OODBBean $client): int
+    private function getOrCreateUser(string $email, $client): int
     {
         try {
             // First try to find existing user
@@ -683,13 +853,6 @@ class Service implements InjectionAwareInterface
         return strtolower($username);
     }
 
-    /**
-     * Generate random password
-     */
-    private function generateRandomPassword(): string
-    {
-        return bin2hex(random_bytes(16));
-    }
 
     /**
      * Get or create an allocation on the specified node
@@ -950,6 +1113,13 @@ class Service implements InjectionAwareInterface
             }
         }
         
+        // Process special variables (AUTO_PASSWORD, RANDOM_STRING, etc.)
+        foreach ($environment as $key => $value) {
+            if ($value === 'AUTO_PASSWORD' || $value === 'RANDOM_STRING' || $value === 'GENERATE_RANDOM') {
+                $environment[$key] = $this->generateRandomPassword();
+            }
+        }
+        
         return $environment;
     }
 
@@ -1076,6 +1246,35 @@ class Service implements InjectionAwareInterface
         } catch (\Exception $e) {
             throw new \FOSSBilling\Exception('Failed to update server build: ' . $e->getMessage());
         }
+    }
+
+
+    /**
+     * Parse variables like {{ client.first_name }}
+     */
+    private function parseVariables(string $text, $client, int $serviceId, $order = null): string
+    {
+        $vars = [
+            '{{ client.id }}' => $client->id,
+            '{{ client.first_name }}' => $client->first_name,
+            '{{ client.last_name }}' => $client->last_name,
+            '{{ service.id }}' => $serviceId,
+            '{{ date }}' => date('Y-m-d'),
+        ];
+        
+        if ($order && isset($order->title)) {
+            $vars['{{ product.title }}'] = $order->title;
+        }
+
+        return str_replace(array_keys($vars), array_values($vars), $text);
+    }
+    
+    /**
+     * Generate a random password/string
+     */
+    private function generateRandomPassword(int $length = 16): string
+    {
+        return bin2hex(random_bytes($length / 2));
     }
 
     /**
@@ -1299,5 +1498,5 @@ class Service implements InjectionAwareInterface
             return [];
         }
     }
-
 }
+
