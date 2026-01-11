@@ -32,14 +32,12 @@
                             </svg>
                             Access Panel
                         </a>
-                        {% if service.sso_url %}
-                        <a href="{{ service.sso_url }}" target="_blank" class="btn btn-success btn-sm ms-2">
+                        <button type="button" class="btn btn-success btn-sm ms-2" id="sso-login-btn">
                             <svg class="icon" width="16" height="16">
                                 <use xlink:href="#login" />
                             </svg>
                             Login (SSO)
-                        </a>
-                        {% endif %}
+                        </button>
                     </td>
                 </tr>
                 {% endif %}
@@ -54,3 +52,31 @@
     </div>
 </div>
 {% endif %}
+
+<script>
+    document.addEventListener('DOMContentLoaded', function() {
+        const ssoBtn = document.getElementById('sso-login-btn');
+        if (ssoBtn) {
+            ssoBtn.addEventListener('click', function() {
+                const btn = this;
+                const originalText = btn.innerHTML;
+                btn.innerHTML = 'Loading...';
+                btn.disabled = true;
+
+                API.client.post('servicepterodactyl/sso', {
+                    order_id: {{ order.id }}
+                }, function(result) {
+                    if (result) {
+                        window.open(result, '_blank');
+                    }
+                    btn.innerHTML = originalText;
+                    btn.disabled = false;
+                }, function(error) {
+                    FOSSBilling.message(error.message, 'error');
+                    btn.innerHTML = originalText;
+                    btn.disabled = false;
+                });
+            });
+        }
+    });
+</script>
