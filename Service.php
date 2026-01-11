@@ -280,11 +280,20 @@ class Service implements InjectionAwareInterface
 
     public function cancel($order, $model): bool
     {
-        return $this->suspend($order, $model);
+        // As per requirements, cancellation (after grace period) should terminate the server
+        // to free up resources in Pterodactyl.
+        $this->unprovision($order, $model);
+        return true;
     }
 
     public function uncancel($order, $model): bool
     {
+        // If the server was deleted (unprovisioned) during cancellation, re-provision it.
+        if (empty($model->server_id)) {
+            return $this->provision($order, $model);
+        }
+        
+        // If server ID still exists, just unsuspend it
         return $this->unsuspend($order, $model);
     }
 
@@ -328,6 +337,13 @@ class Service implements InjectionAwareInterface
 
     public function toApiArray($model): array
     {
+        $config = json_decode($model->config, true);
+        
+        // Remove sensitive information from config before sending to client
+        unset($config['api_key']);
+        unset($config['sso_secret']);
+        unset($config['password']); // Initial password might be here
+        
         $result = [
             'id' => $model->id,
             'created_at' => $model->created_at,
@@ -335,7 +351,7 @@ class Service implements InjectionAwareInterface
             'status' => $model->status ?? 'active',
             'server_id' => $model->server_id,
             'server_identifier' => $model->server_identifier,
-            'config' => json_decode($model->config, true),
+            'config' => $config,
         ];
         
         // Add panel URL if server exists
@@ -397,7 +413,8 @@ class Service implements InjectionAwareInterface
             
             // Try to fetch system info (nodes) to verify API key
             $start = microtime(true);
-            $response = $this->pterodactylApiRequest('GET', '/api/application/nodes');
+            $api = $this->getApi();
+            $response = $api->getNodes();
             $duration = round((microtime(true) - $start) * 1000, 2);
             
             $nodes = [];
@@ -439,7 +456,8 @@ class Service implements InjectionAwareInterface
     public function getNodes(): array
     {
         try {
-            $response = $this->pterodactylApiRequest('GET', '/api/application/nodes');
+            $api = $this->getApi();
+            $response = $api->getNodes();
             $nodes = [];
             
             if (!empty($response['data'])) {
@@ -447,12 +465,12 @@ class Service implements InjectionAwareInterface
                     $nodes[] = [
                         'id' => $node['attributes']['id'],
                         'name' => $node['attributes']['name'],
+                        'location_id' => $node['attributes']['location_id'],
                         'public' => $node['attributes']['public'],
-                        'maintenance_mode' => $node['attributes']['maintenance_mode'],
+                        'maintenance' => $node['attributes']['maintenance_mode'],
                     ];
                 }
             }
-            
             return $nodes;
         } catch (\Exception $e) {
             return [];
@@ -465,7 +483,8 @@ class Service implements InjectionAwareInterface
     public function getLocations(): array
     {
         try {
-            $response = $this->pterodactylApiRequest('GET', '/api/application/locations');
+            $api = $this->getApi();
+            $response = $api->getLocations();
             $locations = [];
             
             if (!empty($response['data'])) {
@@ -477,7 +496,6 @@ class Service implements InjectionAwareInterface
                     ];
                 }
             }
-            
             return $locations;
         } catch (\Exception $e) {
             return [];
@@ -490,7 +508,8 @@ class Service implements InjectionAwareInterface
     public function getEggs(): array
     {
         try {
-            $response = $this->pterodactylApiRequest('GET', '/api/application/nests?include=eggs');
+            $api = $this->getApi();
+            $response = $api->getEggs();
             $eggs = [];
             
             if (!empty($response['data'])) {
@@ -508,7 +527,6 @@ class Service implements InjectionAwareInterface
                     }
                 }
             }
-            
             return $eggs;
         } catch (\Exception $e) {
             return [];
@@ -538,32 +556,19 @@ class Service implements InjectionAwareInterface
             return '';
         }
 
-        // Fetch user ID from Pterodactyl
-        // We might need to store user_id in the database to avoid API call, 
-        // but for now let's fetch it or use the one we created.
-        // Wait, we don't store Pterodactyl User ID in service_pterodactyl table, only server_id.
-        // We can fetch server details to get user ID.
         try {
-            $server = $this->pterodactylApiRequest('GET', "/api/application/servers/{$model->server_id}");
+            $api = $this->getApi($config);
+            $server = $api->getServerDetails($model->server_id);
             $userId = $server['attributes']['user'];
+            
+            // Use WemX SSO plugin method
+            return $api->getSSORedirect($userId, $ssoSecret);
         } catch (\Exception $e) {
+            if (isset($this->di['logger'])) {
+                $this->di['logger']->error('Pterodactyl SSO Error: ' . $e->getMessage());
+            }
             return '';
         }
-
-        $data = [
-            'user_id' => $userId,
-            'timestamp' => time(),
-        ];
-        
-        $jsonData = json_encode($data);
-        $base64Data = base64_encode($jsonData);
-        $signature = hash_hmac('sha256', $jsonData, $ssoSecret); // Note: verify if signature is on json or base64. Usually on raw string.
-        // WemX SSO documentation says: signature = hash_hmac('sha256', data, secret). 
-        // If data is passed as base64, signature usually matches the decoded content.
-        // Let's assume signature is on the JSON string.
-
-        $baseUrl = rtrim($panelConfig['panel_url'], '/');
-        return "$baseUrl/auth/sso?data=$base64Data&signature=$signature";
     }
 
     /**
@@ -571,6 +576,7 @@ class Service implements InjectionAwareInterface
      */
     private function createPterodactylServer(array $config, $client, $model, $order): array
     {
+        $api = $this->getApi($config);
         $panelConfig = $this->panelConfig ?? $this->getPanelConfig($config);
         
         // First, we need to create or get the user
@@ -682,7 +688,6 @@ class Service implements InjectionAwareInterface
         $this->checkNodeResources($nodeId, $requiredMemory, $requiredDisk);
 
         // Process environment variables and handle Auto Port
-        $environment = $this->prepareEnvironmentVariables($eggInfo, $config);
         $autoPortEnabled = false;
 
         // Check if any variable requests AUTO_PORT
@@ -695,8 +700,9 @@ class Service implements InjectionAwareInterface
 
         // Handle Port Allocation
         if ($autoPortEnabled || !empty($config['auto_port'])) {
-            $port = $this->findAvailablePort($nodeId);
-            $allocationId = $this->createAllocation($nodeId, $port);
+            $allocation = $api->findFreeAllocation($nodeId);
+            $allocationId = $allocation['id'];
+            $port = $allocation['port'];
             
             // Replace AUTO_PORT in environment variables with the actual port
             foreach ($environment as $key => $value) {
@@ -705,7 +711,8 @@ class Service implements InjectionAwareInterface
                 }
             }
         } else {
-            $allocationId = $this->getOrCreateAllocation($nodeId);
+            $allocation = $api->findFreeAllocation($nodeId);
+            $allocationId = $allocation['id'];
         }
         
         $serverData['allocation'] = [
@@ -717,7 +724,7 @@ class Service implements InjectionAwareInterface
         // Usually, these are part of the main payload, not environment
         // Already handled above in $serverData construction
         
-        $response = $this->pterodactylApiRequest('POST', '/api/application/servers', $serverData);
+        $response = $api->createServer($serverData);
         
         if (!isset($response['attributes']['id'])) {
             throw new \FOSSBilling\Exception('Failed to create server on Pterodactyl');
@@ -736,16 +743,17 @@ class Service implements InjectionAwareInterface
     private function checkNodeResources(int $nodeId, int $requiredMemory, int $requiredDisk): void
     {
         try {
-            $response = $this->pterodactylApiRequest('GET', "/api/application/nodes/{$nodeId}");
+            $api = $this->getApi();
+            $response = $api->getNode($nodeId);
             if (empty($response['attributes'])) {
-                return; // Could not fetch node, skip check or fail? Let's skip to avoid blocking if API is weird.
+                return; 
             }
             $node = $response['attributes'];
 
             // Calculate Memory
             $totalMemory = $node['memory'];
             $usedMemory = $node['allocated_resources']['memory'];
-            $memoryOverallocate = $node['memory_overallocate']; // Percentage or -1
+            $memoryOverallocate = $node['memory_overallocate']; 
             
             $totalMemoryAvailable = ($memoryOverallocate == -1) ? PHP_INT_MAX : $totalMemory * (1 + ($memoryOverallocate / 100));
             $freeMemory = $totalMemoryAvailable - $usedMemory;
@@ -767,13 +775,9 @@ class Service implements InjectionAwareInterface
             }
 
         } catch (\Exception $e) {
-            // Re-throw if it's our exception, otherwise log/ignore?
             if ($e instanceof \FOSSBilling\Exception) {
                 throw $e;
             }
-            // If API fails, we might want to let Pterodactyl handle the error or fail safe.
-            // Let's log and proceed, or fail. User asked for stock check.
-            error_log("Stock check failed: " . $e->getMessage());
         }
     }
 
@@ -783,7 +787,7 @@ class Service implements InjectionAwareInterface
      */
     private function suspendPterodactylServer(int $serverId): void
     {
-        $this->pterodactylApiRequest('POST', "/api/application/servers/{$serverId}/suspend");
+        $this->getApi()->suspendServer($serverId);
     }
 
     /**
@@ -791,7 +795,7 @@ class Service implements InjectionAwareInterface
      */
     private function unsuspendPterodactylServer(int $serverId): void
     {
-        $this->pterodactylApiRequest('POST', "/api/application/servers/{$serverId}/unsuspend");
+        $this->getApi()->unsuspendServer($serverId);
     }
 
     /**
@@ -799,7 +803,7 @@ class Service implements InjectionAwareInterface
      */
     private function deletePterodactylServer(int $serverId): void
     {
-        $this->pterodactylApiRequest('DELETE', "/api/application/servers/{$serverId}");
+        $this->getApi()->deleteServer($serverId);
     }
 
     /**
@@ -808,8 +812,9 @@ class Service implements InjectionAwareInterface
     private function getOrCreateUser(string $email, $client): int
     {
         try {
+            $api = $this->getApi();
             // First try to find existing user
-            $response = $this->pterodactylApiRequest('GET', "/api/application/users?filter[email]={$email}");
+            $response = $api->getUsers($email);
             
             if (!empty($response['data'])) {
                 return $response['data'][0]['attributes']['id'];
@@ -824,7 +829,7 @@ class Service implements InjectionAwareInterface
                 'password' => $this->generateRandomPassword(),
             ];
             
-            $response = $this->pterodactylApiRequest('POST', '/api/application/users', $userData);
+            $response = $api->createUser($userData);
             
             if (!isset($response['attributes']['id'])) {
                 throw new \FOSSBilling\Exception('Failed to create user on Pterodactyl');
@@ -854,99 +859,6 @@ class Service implements InjectionAwareInterface
     }
 
 
-    /**
-     * Get or create an allocation on the specified node
-     */
-    private function getOrCreateAllocation(int $nodeId): int
-    {
-        try {
-            // First try to find an available allocation on the node (unassigned ones)
-            $response = $this->pterodactylApiRequest('GET', "/api/application/nodes/{$nodeId}/allocations");
-            
-            // Filter unassigned allocations client-side
-            if (!empty($response['data'])) {
-                foreach ($response['data'] as $allocation) {
-                    if (empty($allocation['attributes']['assigned'])) {
-                        return $allocation['attributes']['id'];
-                    }
-                }
-            }
-            
-            // If no available allocation, create a new one
-            // We'll try to find an available port
-            $port = $this->findAvailablePort($nodeId);
-            
-            $allocationData = [
-                'ip' => '0.0.0.0', // Default IP
-                'ports' => [$port],
-            ];
-            
-            $response = $this->pterodactylApiRequest('POST', "/api/application/nodes/{$nodeId}/allocations", $allocationData);
-            
-            if (!empty($response['data'])) {
-                return $response['data'][0]['attributes']['id'];
-            }
-            
-            throw new \FOSSBilling\Exception('Failed to create allocation on node');
-            
-        } catch (\Exception $e) {
-            throw new \FOSSBilling\Exception('Failed to get or create allocation: ' . $e->getMessage());
-        }
-    }
-
-    /**
-     * Create a new allocation on the node
-     */
-    private function createAllocation(int $nodeId, int $port): int
-    {
-        try {
-            $response = $this->pterodactylApiRequest('POST', "/api/application/nodes/{$nodeId}/allocations", [
-                'ip' => '0.0.0.0', // Default to wildcard or fetch node IP if needed
-                'ports' => [(string)$port]
-            ]);
-            
-            // Pterodactyl returns 204 on success for allocation creation? No, it returns the created allocations.
-            // But wait, the API might not return the ID directly in a simple format.
-            // Actually, to assign it to the server, we need the allocation ID.
-            
-            // Let's check the response structure. Usually it's a list of created allocations.
-            // If we created one, we take the first one.
-            
-            if (!empty($response['data']) && isset($response['data'][0]['attributes']['id'])) {
-                return $response['data'][0]['attributes']['id'];
-            }
-            
-            // If we can't find the ID in the response, we might need to search for it
-            // But for now, let's assume standard Pterodactyl API behavior
-            throw new \FOSSBilling\Exception('Failed to retrieve created allocation ID');
-            
-        } catch (\Exception $e) {
-             // If allocation creation fails (e.g. port taken), try to find it first?
-             // Or maybe we should just fail.
-             // But wait, 'ip' is required. We should probably get the node's main IP.
-             // For now let's use 0.0.0.0 as placeholder, but ideally we should query node details.
-             
-             // Let's try to fetch node details to get the IP
-             $nodeInfo = $this->getNodeInfo($nodeId);
-             $ip = '0.0.0.0';
-             if (!empty($nodeInfo['allocated_resources']['ports'])) {
-                 // This doesn't give us the IP. 
-                 // We need the node's public IP or a specific allocation IP.
-                 // Let's just try 0.0.0.0 and if it fails, the user needs to configure it properly manually or we need more logic.
-             }
-             
-             throw new \FOSSBilling\Exception('Failed to create allocation: ' . $e->getMessage());
-        }
-    }
-    
-    private function getNodeInfo(int $nodeId): array {
-        try {
-             $response = $this->pterodactylApiRequest('GET', "/api/application/nodes/{$nodeId}");
-             return $response['attributes'] ?? [];
-        } catch (\Exception $e) {
-            return [];
-        }
-    }
 
     /**
      * Get nodes in a specific location
@@ -955,7 +867,8 @@ class Service implements InjectionAwareInterface
     {
         try {
             // Fetch all nodes
-            $response = $this->pterodactylApiRequest('GET', "/api/application/nodes");
+            $api = $this->getApi();
+            $response = $api->getNodes();
             $nodes = [];
             
             if (!empty($response['data'])) {
@@ -972,35 +885,6 @@ class Service implements InjectionAwareInterface
         }
     }
 
-    /**
-     * Find an available port on the node
-     */
-    private function findAvailablePort(int $nodeId): int
-    {
-        // Get existing allocations to find used ports
-        $response = $this->pterodactylApiRequest('GET', "/api/application/nodes/{$nodeId}/allocations");
-        
-        $usedPorts = [];
-        if (!empty($response['data'])) {
-            foreach ($response['data'] as $allocation) {
-                $usedPorts[] = $allocation['attributes']['port'];
-            }
-        }
-        
-        // Find an available port starting from 25565 (common Minecraft port)
-        $startPort = 25565;
-        $maxTries = 1000;
-        
-        for ($i = 0; $i < $maxTries; $i++) {
-            $port = $startPort + $i;
-            if (!in_array($port, $usedPorts)) {
-                return $port;
-            }
-        }
-        
-        // Fallback to a random high port
-        return rand(30000, 65535);
-    }
 
     /**
      * Get egg information from Pterodactyl
@@ -1008,18 +892,22 @@ class Service implements InjectionAwareInterface
     public function getEggInfo(int $eggId, ?int $nestId = null): array
     {
         try {
+            $api = $this->getApi();
+            
             // If nestId is not provided, we need to find it
             if (!$nestId) {
                 // First get all nests
-                $nestsResponse = $this->pterodactylApiRequest('GET', "/api/application/nests?include=eggs");
+                $nestsResponse = $api->getEggs();
                 
                 // Find which nest contains our egg
-                foreach ($nestsResponse['data'] as $nest) {
-                    if (isset($nest['attributes']['relationships']['eggs']['data'])) {
-                        foreach ($nest['attributes']['relationships']['eggs']['data'] as $egg) {
-                            if ($egg['attributes']['id'] === $eggId) {
-                                $nestId = $nest['attributes']['id'];
-                                break 2;
+                if (!empty($nestsResponse['data'])) {
+                    foreach ($nestsResponse['data'] as $nest) {
+                        if (isset($nest['attributes']['relationships']['eggs']['data'])) {
+                            foreach ($nest['attributes']['relationships']['eggs']['data'] as $egg) {
+                                if ($egg['attributes']['id'] === $eggId) {
+                                    $nestId = $nest['attributes']['id'];
+                                    break 2;
+                                }
                             }
                         }
                     }
@@ -1031,24 +919,12 @@ class Service implements InjectionAwareInterface
             }
             
             // Get detailed egg info from the nest
-            $response = $this->pterodactylApiRequest('GET', "/api/application/nests/{$nestId}/eggs/{$eggId}?include=variables");
+            $response = $api->getEgg($nestId, $eggId);
             
             // Ensure we return attributes AND relationships
             $attributes = $response['attributes'] ?? [];
             if (isset($response['relationships'])) {
-                 // If relationships are siblings (depending on API version/serializer), merge them in
                  $attributes['relationships'] = $response['relationships'];
-            } elseif (isset($attributes['relationships'])) {
-                 // Already inside attributes, do nothing
-            } elseif (isset($response['data']['relationships'])) {
-                 // Sometimes it might be in data? (Unlikely for single resource but checking)
-            }
-            
-            // Fallback: if relationships are missing in attributes but present in the root response under a different key?
-            // Standard Pterodactyl with include=variables usually puts relationships inside attributes or as sibling.
-            // We ensure they are available in the returned array.
-            if (!isset($attributes['relationships']) && isset($response['attributes']['relationships'])) {
-                 // This case is covered by "Already inside attributes"
             }
             
             return $attributes;
@@ -1128,13 +1004,14 @@ class Service implements InjectionAwareInterface
      */
     public function getServerVariables(int $serverId): array
     {
-        // Requires GET /api/application/servers/{server}/startup
-        // Note: The Application API endpoint is /api/application/servers/{id}/startup
-        $response = $this->pterodactylApiRequest('GET', "/api/application/servers/{$serverId}/startup");
-        
-        return $response['data'] ? array_map(function($item) {
-            return $item['attributes'];
-        }, $response['data']) : [];
+        try {
+            $response = $this->getApi()->getServerStartup($serverId);
+            return $response['data'] ? array_map(function($item) {
+                return $item['attributes'];
+            }, $response['data']) : [];
+        } catch (\Exception $e) {
+            return [];
+        }
     }
 
     /**
@@ -1142,50 +1019,31 @@ class Service implements InjectionAwareInterface
      */
     public function updateServerVariables(int $serverId, array $variables): void
     {
-        // Update variables one by one or batch?
-        // Application API: PUT /api/application/servers/{server}/startup
-        // It accepts an array of environment variables
+        $api = $this->getApi();
         
-        $data = [
-            'environment' => $variables,
-            'startup' => null, // Optional: update startup command if needed, but we focus on vars
-            'egg' => null, // Optional: egg ID
-            'image' => null, // Optional: docker image
-            'skip_scripts' => false
-        ];
-        
-        // However, the endpoint PUT /api/application/servers/{server}/startup expects:
-        // { "startup": "...", "environment": { "VAR": "val" }, "egg": id, "image": "...", "skip_scripts": false }
-        // We need to be careful not to reset other things if we only want to update vars.
-        // Actually, it's safer to just update the specific variables if possible, but the API might require full payload.
-        
-        // Let's first fetch current config to preserve startup/egg/image
-        $response = $this->pterodactylApiRequest('GET', "/api/application/servers/{$serverId}");
+        // Fetch current config
+        $response = $api->getServerDetails($serverId);
         $serverAttr = $response['attributes'];
         
-        $payload = [
-            'startup' => $serverAttr['container']['startup_command'],
-            'environment' => $variables, // This merges? Or replaces? API docs say "The environment object should contain key-value pairs..."
-            'egg' => $serverAttr['egg'],
-            'image' => $serverAttr['container']['image'],
-            'skip_scripts' => true // Usually safer to skip scripts on variable update unless intended
-        ];
-        
-        // We need to merge existing environment variables with new ones to avoid losing others?
-        // Actually, let's fetch current variables first to be safe
+        // Fetch current variables to merge
         $currentVars = $this->getServerVariables($serverId);
         $mergedVars = [];
         foreach ($currentVars as $v) {
             $mergedVars[$v['env_variable']] = $v['server_value'];
         }
-        // Overwrite with new values
         foreach ($variables as $k => $v) {
             $mergedVars[$k] = $v;
         }
         
-        $payload['environment'] = $mergedVars;
+        $payload = [
+            'startup' => $serverAttr['container']['startup_command'],
+            'environment' => $mergedVars,
+            'egg' => $serverAttr['egg'],
+            'image' => $serverAttr['container']['image'],
+            'skip_scripts' => true
+        ];
 
-        $this->pterodactylApiRequest('PUT', "/api/application/servers/{$serverId}/startup", $payload);
+        $api->updateServerStartup($serverId, $payload);
     }
 
     /**
@@ -1240,7 +1098,7 @@ class Service implements InjectionAwareInterface
                 ],
             ];
 
-            $this->pterodactylApiRequest('POST', "/api/application/servers/{$model->server_id}/build", $buildData);
+            $this->getApi()->updateServerBuild($model->server_id, $buildData);
             
             return true;
         } catch (\Exception $e) {
@@ -1278,98 +1136,12 @@ class Service implements InjectionAwareInterface
     }
 
     /**
-     * Change account password on Pterodactyl panel
-     * This follows FOSSBilling naming convention for compatibility with admin interface
-     * Can be called from both admin and client contexts
-     * 
-     * @param OODBBean|int $orderOrId - Order bean or order ID
-     * @param OODBBean|null $model - Service model (optional)
-     * @param array|string $data - Password data or string
-     * @return bool
-     */
-    public function changeAccountPassword($orderOrId, $model = null, $data = []): bool
-    {
-        // Handle different parameter formats from FOSSBilling
-        if (is_object($orderOrId)) {
-            // Called with order bean
-            $order = $orderOrId;
-            $orderId = $order->id;
-        } else {
-            // Called with order ID
-            $orderId = $orderOrId;
-            $order = $this->di['db']->getExistingModelById('ClientOrder', $orderId, 'Order not found');
-        }
-        
-        // Extract password from data
-        $newPassword = null;
-        if (is_string($data)) {
-            $newPassword = $data;
-        } elseif (is_array($data)) {
-            $newPassword = $data['password'] ?? $data['new_password'] ?? null;
-        } elseif (is_string($model)) {
-            // Sometimes password is passed as second parameter
-            $newPassword = $model;
-            $model = null;
-        }
-        
-        if (empty($newPassword)) {
-            throw new \FOSSBilling\Exception('Password is required');
-        }
-        
-        // Get service model if not provided
-        if (!$model) {
-            $orderService = $this->di['mod_service']('order');
-            $model = $orderService->getOrderService($order);
-        }
-        
-        if (!$model->server_id) {
-            throw new \FOSSBilling\Exception('Server not provisioned');
-        }
-
-        try {
-            // Get config to access panel
-            $config = json_decode($order->config, 1);
-            $this->panelConfig = $this->getPanelConfig($config);
-            
-            // Get client information
-            $client = $this->di['db']->load('client', $order->client_id);
-            if (!$client) {
-                throw new \FOSSBilling\Exception('Client not found');
-            }
-            
-            // Get user ID from Pterodactyl
-            $userEmail = $client->email ?? 'noemail@example.com';
-            $userId = $this->getOrCreateUser($userEmail, $client);
-            
-            // Update password via Pterodactyl API
-            $userData = [
-                'email' => $userEmail,
-                'username' => $this->generateUsername($userEmail),
-                'first_name' => $client->first_name ?? 'Client',
-                'last_name' => $client->last_name ?? 'User',
-                'password' => $newPassword,
-            ];
-            
-            $this->pterodactylApiRequest('PATCH', "/api/application/users/{$userId}", $userData);
-            
-            // Log the password change
-            if (isset($this->di['logger'])) {
-                $this->di['logger']->info('Pterodactyl password changed for order #%s', $orderId);
-            }
-            
-            return true;
-        } catch (\Exception $e) {
-            throw new \FOSSBilling\Exception('Failed to change password: ' . $e->getMessage());
-        }
-    }
-
-    /**
      * Get server information from Pterodactyl
      */
     public function getServerInfo(int $serverId): array
     {
         try {
-            $response = $this->pterodactylApiRequest('GET', "/api/application/servers/{$serverId}");
+            $response = $this->getApi()->getServerDetails($serverId);
             return $response['attributes'] ?? [];
         } catch (\Exception $e) {
             throw new \FOSSBilling\Exception('Failed to get server info: ' . $e->getMessage());
@@ -1382,7 +1154,7 @@ class Service implements InjectionAwareInterface
     public function getServerStatus(int $serverId): array
     {
         try {
-            $response = $this->pterodactylApiRequest('GET', "/api/client/servers/{$serverId}/resources");
+            $response = $this->getApi()->getServerResources($serverId);
             return $response['attributes'] ?? [];
         } catch (\Exception $e) {
             throw new \FOSSBilling\Exception('Failed to get server status: ' . $e->getMessage());
@@ -1390,65 +1162,21 @@ class Service implements InjectionAwareInterface
     }
 
     /**
-     * Make API request to Pterodactyl panel
+     * Get API client instance
      */
-    private function pterodactylApiRequest(string $method, string $endpoint, array $data = []): array
+    private function getApi(array $config = []): PterodactylApi
     {
-        if ($this->panelConfig === null) {
-            $this->panelConfig = $this->getGlobalPanelConfig();
-        }
-        $panelConfig = $this->panelConfig;
+        $panelConfig = $this->getPanelConfig($config);
         
         if (empty($panelConfig['panel_url']) || empty($panelConfig['api_key'])) {
-            throw new \FOSSBilling\Exception('Pterodactyl settings are not configured.');
+            throw new \FOSSBilling\Exception('Pterodactyl settings are not configured. Please check module settings.');
         }
 
-        // Validate URL
-        if (!filter_var($panelConfig['panel_url'], FILTER_VALIDATE_URL)) {
-             throw new \FOSSBilling\Exception('Pterodactyl panel URL is invalid. It must include http:// or https://. Value: ' . $panelConfig['panel_url']);
-        }
-        
-        $url = rtrim($panelConfig['panel_url'], '/') . $endpoint;
-        
-        $headers = [
-            'Authorization: Bearer ' . $panelConfig['api_key'],
-            'Content-Type: application/json',
-            'Accept: application/json',
-        ];
-
-        $ch = curl_init();
-        curl_setopt($ch, CURLOPT_URL, $url);
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
-        curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
-        
-        if (!empty($data)) {
-            curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
-        }
-
-        $response = curl_exec($ch);
-        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        
-        if ($response === false) {
-            $error = curl_error($ch);
-            curl_close($ch);
-            throw new \FOSSBilling\Exception('Pterodactyl API connection failed: ' . $error);
-        }
-
-        curl_close($ch);
-
-        if ($httpCode >= 400) {
-            $errorDetails = '';
-            if ($response) {
-                $errorData = json_decode($response, true);
-                if (isset($errorData['errors'])) {
-                    $errorDetails = ' - ' . json_encode($errorData['errors']);
-                }
-            }
-            throw new \FOSSBilling\Exception('Pterodactyl API request failed with HTTP code: ' . $httpCode . $errorDetails);
-        }
-
-        return json_decode($response, true) ?? [];
+        return new PterodactylApi(
+            $panelConfig['panel_url'],
+            $panelConfig['api_key'],
+            isset($this->di['logger']) ? $this->di['logger'] : null
+        );
     }
 
     /**
@@ -1469,11 +1197,8 @@ class Service implements InjectionAwareInterface
             'api_key' => $orderConfig['api_key'] ?? $globalConfig['api_key'] ?? '',
             'sso_secret' => $orderConfig['sso_secret'] ?? $globalConfig['sso_secret'] ?? '',
             'allowed_nodes' => $globalConfig['allowed_nodes'] ?? [],
+            'default_node' => $globalConfig['default_node'] ?? 0,
         ];
-
-        if (empty($config['panel_url']) || empty($config['api_key'])) {
-            throw new \FOSSBilling\Exception('Pterodactyl panel URL and API key must be configured. Please configure them in the module settings.');
-        }
 
         return $config;
     }
@@ -1492,6 +1217,7 @@ class Service implements InjectionAwareInterface
                 'api_key' => $settingService->getParamValue('servicepterodactyl_api_key', ''),
                 'sso_secret' => $settingService->getParamValue('servicepterodactyl_sso_secret', ''),
                 'allowed_nodes' => json_decode($settingService->getParamValue('servicepterodactyl_allowed_nodes', '[]'), true) ?? [],
+                'default_node' => $settingService->getParamValue('servicepterodactyl_default_node', 0),
             ];
         } catch (\Exception $e) {
             // If system service not available, return empty array

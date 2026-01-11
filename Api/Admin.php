@@ -196,31 +196,6 @@ class Admin extends \Api_Abstract
     }
 
     /**
-     * Change account password on Pterodactyl server.
-     * This method is called by FOSSBilling admin interface
-     *
-     * @param array $data - An associative array
-     *                    - int 'order_id' (required) The order ID
-     *                    - string 'password' (required) The new password
-     */
-    public function change_account_password($data): bool
-    {
-        if (empty($data['order_id'])) {
-            throw new \FOSSBilling\Exception('Order ID is required.');
-        }
-
-        if (empty($data['password'])) {
-            throw new \FOSSBilling\Exception('Password is required.');
-        }
-
-        // Get order
-        $order = $this->di['db']->getExistingModelById('ClientOrder', $data['order_id'], 'Order not found');
-        
-        // Admin context - no ownership check needed
-        return $this->getService()->changeAccountPassword($order, null, ['password' => $data['password']]);
-    }
-
-    /**
      * Test connection to Pterodactyl.
      *
      * @return array
