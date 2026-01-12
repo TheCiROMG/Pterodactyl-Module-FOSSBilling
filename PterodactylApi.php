@@ -25,7 +25,7 @@ class PterodactylApi
         $headers = [
             'Authorization: Bearer ' . $this->apiKey,
             'Content-Type: application/json',
-            'Accept: application/json',
+            'Accept: Application/vnd.pterodactyl.v1+json',
         ];
 
         $ch = curl_init();
@@ -137,13 +137,6 @@ class PterodactylApi
     public function getServerStartup(int $serverId): array
     {
         return $this->request('GET', "/api/application/servers/{$serverId}/startup");
-    }
-
-    public function getServerResources(int $serverId): array
-    {
-        // Note: This endpoint is part of the Client API, not Application API.
-        // It might fail if the API key provided is an Application API key.
-        return $this->request('GET', "/api/client/servers/{$serverId}/resources");
     }
 
     public function getUsers(string $filterEmail = null): array
@@ -264,48 +257,5 @@ class PterodactylApi
         }
         
         throw new \FOSSBilling\Exception('Failed to get SSO redirect URL: ' . ($response['message'] ?? 'Unknown error'));
-    }
-    
-    /**
-     * Client API Methods
-     */
-    public function getClientServerResources(string $serverIdentifier): array
-    {
-        // Client API uses the same base URL but /api/client
-        // And it requires a Client API Key, NOT Application API Key.
-        // However, the module currently uses Application API for everything.
-        // To use Client API, we would need to impersonate the user or ask for a Client API key in settings.
-        // Pterodactyl Application API does NOT allow checking live resources (CPU/RAM).
-        // That is only available via Client API.
-        
-        // For now, we will stub this or return empty if we can't use Client API.
-        // To properly support this, we would need to:
-        // 1. Generate a Client API Key for the admin user (not ideal)
-        // 2. Or use the user's API key (we don't have it)
-        // 3. Or just stick to Application API which doesn't support stats.
-        
-        // Actually, some "admin" resource usage might be available via Application API?
-        // No, Application API is for management. Client API is for interaction.
-        
-        return [];
-    }
-    
-    /**
-     * Send power signal to server (Client API)
-     */
-    public function sendPowerSignal(string $serverIdentifier, string $signal): void
-    {
-        // Requires Client API.
-        // We can't do this easily with just the Application API Key.
-        // We would need to implement a way to get a Client API key or assume the admin provided one?
-        // Usually, modules that do this ask for a "Client API Key" in settings as well, 
-        // OR they create a temporary API key for the user (complex).
-        
-        // Alternative: Use the "Login as user" feature? No API for that.
-        
-        // For this task, we will focus on Application API improvements.
-        // If the user wants Client features, we might need to change the architecture significantly.
-        // I'll leave a placeholder.
-        throw new \FOSSBilling\Exception('Power actions require Client API access which is not yet configured.');
     }
 }

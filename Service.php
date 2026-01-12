@@ -245,7 +245,16 @@ class Service implements InjectionAwareInterface
             $this->panelConfig = $this->getPanelConfig($config);
             
             if ($model->server_id) {
-                $this->suspendPterodactylServer($model->server_id);
+                try {
+                    $this->suspendPterodactylServer($model->server_id);
+                } catch (\Exception $e) {
+                    // Log error but continue to update status in FOSSBilling
+                    // This prevents the order from being stuck in "Active" if Pterodactyl API fails
+                    // (e.g. server already suspended or connection issue)
+                    if (isset($this->di['logger'])) {
+                        $this->di['logger']->error('Failed to suspend Pterodactyl server ' . $model->server_id . ': ' . $e->getMessage());
+                    }
+                }
             }
             
             $model->status = 'suspended';
@@ -254,7 +263,7 @@ class Service implements InjectionAwareInterface
 
             return true;
         } catch (\Exception $e) {
-            throw new \FOSSBilling\Exception('Failed to suspend server: ' . $e->getMessage());
+            throw new \FOSSBilling\Exception('Failed to suspend service: ' . $e->getMessage());
         }
     }
 
@@ -265,7 +274,14 @@ class Service implements InjectionAwareInterface
             $this->panelConfig = $this->getPanelConfig($config);
             
             if ($model->server_id) {
-                $this->unsuspendPterodactylServer($model->server_id);
+                try {
+                    $this->unsuspendPterodactylServer($model->server_id);
+                } catch (\Exception $e) {
+                    // Log error but continue to update status
+                    if (isset($this->di['logger'])) {
+                        $this->di['logger']->error('Failed to unsuspend Pterodactyl server ' . $model->server_id . ': ' . $e->getMessage());
+                    }
+                }
             }
             
             $model->status = 'active';
@@ -274,7 +290,7 @@ class Service implements InjectionAwareInterface
 
             return true;
         } catch (\Exception $e) {
-            throw new \FOSSBilling\Exception('Failed to unsuspend server: ' . $e->getMessage());
+            throw new \FOSSBilling\Exception('Failed to unsuspend service: ' . $e->getMessage());
         }
     }
 
@@ -320,7 +336,14 @@ class Service implements InjectionAwareInterface
                 
                 // Delete server from Pterodactyl if exists
                 if ($model->server_id) {
-                    $this->deletePterodactylServer($model->server_id);
+                    try {
+                        $this->deletePterodactylServer($model->server_id);
+                    } catch (\Exception $e) {
+                        // If server is already gone or API error, log it but proceed to mark as deleted locally
+                        if (isset($this->di['logger'])) {
+                            $this->di['logger']->error('Failed to delete Pterodactyl server ' . $model->server_id . ': ' . $e->getMessage());
+                        }
+                    }
                 }
                 
                 // Update model status instead of deleting
@@ -1148,25 +1171,24 @@ class Service implements InjectionAwareInterface
         }
     }
 
-    /**
-     * Get server status from Pterodactyl
-     */
-    public function getServerStatus(int $serverId): array
-    {
-        try {
-            $response = $this->getApi()->getServerResources($serverId);
-            return $response['attributes'] ?? [];
-        } catch (\Exception $e) {
-            throw new \FOSSBilling\Exception('Failed to get server status: ' . $e->getMessage());
-        }
-    }
+
 
     /**
      * Get API client instance
      */
     private function getApi(array $config = []): PterodactylApi
     {
-        $panelConfig = $this->getPanelConfig($config);
+        // If specific config is provided, use it to build panel config
+        // Otherwise, fallback to class-level panelConfig if available (set by suspend/unsuspend/etc)
+        // Finally, fallback to global defaults via getPanelConfig([])
+        
+        if (!empty($config)) {
+            $panelConfig = $this->getPanelConfig($config);
+        } elseif (!empty($this->panelConfig)) {
+            $panelConfig = $this->panelConfig;
+        } else {
+            $panelConfig = $this->getPanelConfig([]);
+        }
         
         if (empty($panelConfig['panel_url']) || empty($panelConfig['api_key'])) {
             throw new \FOSSBilling\Exception('Pterodactyl settings are not configured. Please check module settings.');
