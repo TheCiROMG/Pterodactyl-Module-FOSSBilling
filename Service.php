@@ -443,12 +443,33 @@ class Service implements InjectionAwareInterface
             $nodes = [];
             if (!empty($response['data'])) {
                 foreach ($response['data'] as $node) {
+                    $attr = $node['attributes'];
+                    $allocated = $attr['allocated_resources'] ?? ['memory' => 0, 'disk' => 0];
+                    
+                    $memTotal = $attr['memory'];
+                    $memUsed = $allocated['memory'];
+                    $memPercent = $memTotal > 0 ? round(($memUsed / $memTotal) * 100, 1) : 0;
+                    
+                    $diskTotal = $attr['disk'];
+                    $diskUsed = $allocated['disk'];
+                    $diskPercent = $diskTotal > 0 ? round(($diskUsed / $diskTotal) * 100, 1) : 0;
+
                     $nodes[] = [
-                        'name' => $node['attributes']['name'],
-                        'fqdn' => $node['attributes']['fqdn'],
-                        'scheme' => $node['attributes']['scheme'],
-                        'port' => $node['attributes']['daemon_listen'],
-                        'maintenance' => $node['attributes']['maintenance_mode'],
+                        'name' => $attr['name'],
+                        'fqdn' => $attr['fqdn'],
+                        'scheme' => $attr['scheme'],
+                        'port' => $attr['daemon_listen'],
+                        'maintenance' => $attr['maintenance_mode'],
+                        'memory' => [
+                            'total' => $memTotal,
+                            'used' => $memUsed,
+                            'percent' => $memPercent
+                        ],
+                        'disk' => [
+                            'total' => $diskTotal,
+                            'used' => $diskUsed,
+                            'percent' => $diskPercent
+                        ]
                     ];
                 }
             }

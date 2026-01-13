@@ -159,10 +159,9 @@
                                 <thead>
                                     <tr>
                                         <th>{{ 'Name'|trans }}</th>
-                                        <th>{{ 'FQDN'|trans }}</th>
-                                        <th>{{ 'Port'|trans }}</th>
+                                        <th>{{ 'RAM Usage'|trans }}</th>
+                                        <th>{{ 'Disk Usage'|trans }}</th>
                                         <th>{{ 'Maintenance'|trans }}</th>
-                                        <th>{{ 'Scheme'|trans }}</th>
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -206,10 +205,78 @@
     </div>
     
     <script>
+        // Auto-load debug info if stored in localStorage
+        document.addEventListener('DOMContentLoaded', function() {
+            var storedData = localStorage.getItem('pterodactyl_debug_data');
+            if (storedData) {
+                try {
+                    var data = JSON.parse(storedData);
+                    // Only use cache if less than 5 minutes old
+                    if (new Date().getTime() - data.timestamp < 300000) {
+                        renderDebugResults(data.response);
+                    }
+                } catch (e) {
+                    console.error('Failed to parse stored debug data', e);
+                }
+            }
+        });
+
+        function renderDebugResults(response) {
+            var resultsDiv = document.getElementById('debug-results');
+            var alertDiv = document.getElementById('debug-status-alert');
+            var nodesTable = document.getElementById('debug-nodes-table').getElementsByTagName('tbody')[0];
+            
+            resultsDiv.style.display = 'block';
+            nodesTable.innerHTML = '';
+
+            if (response.success) {
+                alertDiv.className = 'alert alert-success';
+                alertDiv.innerHTML = '<strong>{{ "Success!"|trans }}</strong> ' + response.message;
+            } else {
+                alertDiv.className = 'alert alert-danger';
+                alertDiv.innerHTML = '<strong>{{ "Error!"|trans }}</strong> ' + response.message;
+            }
+            
+            document.getElementById('debug-php-version').textContent = response.php_version;
+            document.getElementById('debug-curl').innerHTML = response.curl_enabled ? '<span class="badge bg-success">{{ "Yes"|trans }}</span>' : '<span class="badge bg-danger">{{ "No"|trans }}</span>';
+            document.getElementById('debug-latency').textContent = response.latency || '-';
+            
+            if (response.nodes && response.nodes.length > 0) {
+                response.nodes.forEach(function(node) {
+                    var row = nodesTable.insertRow();
+                    
+                    // Name & Details
+                    var nameCell = row.insertCell(0);
+                    nameCell.innerHTML = '<strong>' + node.name + '</strong><br><small class="text-muted">' + node.scheme + '://' + node.fqdn + ':' + node.port + '</small>';
+                    
+                    // RAM
+                    var ramCell = row.insertCell(1);
+                    var ramColor = node.memory.percent > 90 ? 'danger' : (node.memory.percent > 75 ? 'warning' : 'primary');
+                    ramCell.innerHTML = '<div class="d-flex justify-content-between mb-1"><small>' + node.memory.used + ' / ' + node.memory.total + ' MB</small><small>' + node.memory.percent + '%</small></div>' +
+                                        '<div class="progress progress-sm"><div class="progress-bar bg-' + ramColor + '" style="width: ' + node.memory.percent + '%"></div></div>';
+
+                    // Disk
+                    var diskCell = row.insertCell(2);
+                    var diskColor = node.disk.percent > 90 ? 'danger' : (node.disk.percent > 75 ? 'warning' : 'primary');
+                    diskCell.innerHTML = '<div class="d-flex justify-content-between mb-1"><small>' + node.disk.used + ' / ' + node.disk.total + ' MB</small><small>' + node.disk.percent + '%</small></div>' +
+                                         '<div class="progress progress-sm"><div class="progress-bar bg-' + diskColor + '" style="width: ' + node.disk.percent + '%"></div></div>';
+                    
+                    // Maintenance
+                    var maintCell = row.insertCell(3);
+                    maintCell.innerHTML = node.maintenance ? '<span class="badge bg-warning">{{ "Yes"|trans }}</span>' : '<span class="badge bg-success">{{ "No"|trans }}</span>';
+                });
+            } else {
+                    var row = nodesTable.insertRow();
+                    var cell = row.insertCell(0);
+                    cell.colSpan = 4;
+                    cell.className = 'text-center text-muted';
+                    cell.textContent = '{{ "No nodes found or connection failed."|trans }}';
+            }
+        }
+
         document.getElementById('btn-test-connection').addEventListener('click', function() {
             var btn = this;
             var resultsDiv = document.getElementById('debug-results');
-            var alertDiv = document.getElementById('debug-status-alert');
             var nodesTable = document.getElementById('debug-nodes-table').getElementsByTagName('tbody')[0];
             
             // Reset UI
@@ -221,39 +288,15 @@
             API.admin.post('servicepterodactyl/test_connection', {}, function(response) {
                 btn.disabled = false;
                 btn.innerHTML = '<svg class="icon"><use xlink:href="#refresh"/></svg> {{ "Test Connection"|trans }}';
-                resultsDiv.style.display = 'block';
                 
-                if (response.success) {
-                    alertDiv.className = 'alert alert-success';
-                    alertDiv.innerHTML = '<strong>{{ "Success!"|trans }}</strong> ' + response.message;
-                } else {
-                    alertDiv.className = 'alert alert-danger';
-                    alertDiv.innerHTML = '<strong>{{ "Error!"|trans }}</strong> ' + response.message;
-                }
+                // Save to cache
+                localStorage.setItem('pterodactyl_debug_data', JSON.stringify({
+                    timestamp: new Date().getTime(),
+                    response: response
+                }));
                 
-                document.getElementById('debug-php-version').textContent = response.php_version;
-                document.getElementById('debug-curl').innerHTML = response.curl_enabled ? '<span class="badge bg-success">{{ "Yes"|trans }}</span>' : '<span class="badge bg-danger">{{ "No"|trans }}</span>';
-                document.getElementById('debug-latency').textContent = response.latency || '-';
-                
-                if (response.nodes && response.nodes.length > 0) {
-                    response.nodes.forEach(function(node) {
-                        var row = nodesTable.insertRow();
-                        row.insertCell(0).textContent = node.name;
-                        row.insertCell(1).textContent = node.fqdn;
-                        row.insertCell(2).textContent = node.port;
-                        
-                        var maintCell = row.insertCell(3);
-                        maintCell.innerHTML = node.maintenance ? '<span class="badge bg-warning">{{ "Yes"|trans }}</span>' : '<span class="badge bg-success">{{ "No"|trans }}</span>';
-                        
-                        row.insertCell(4).textContent = node.scheme;
-                    });
-                } else {
-                     var row = nodesTable.insertRow();
-                     var cell = row.insertCell(0);
-                     cell.colSpan = 5;
-                     cell.className = 'text-center text-muted';
-                     cell.textContent = '{{ "No nodes found or connection failed."|trans }}';
-                }
+                renderDebugResults(response);
+
             }, function(error) {
                 btn.disabled = false;
                 btn.innerHTML = '<svg class="icon"><use xlink:href="#refresh"/></svg> {{ "Test Connection"|trans }}';
