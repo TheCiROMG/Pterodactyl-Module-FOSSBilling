@@ -4,6 +4,9 @@
         <form method="post" action="{{ 'api/admin/product/update_config'|link }}" class="api-form save" data-api-msg="{{ 'Pterodactyl settings updated'|trans }}">
             <input type="hidden" name="CSRFToken" value="{{ CSRFToken }}"/>
             
+            {# Deployment Settings - Only show in Product Configuration (not Order Config) #}
+            {# Check for 'product_id' to detect if we are in Order context (Model_ClientOrder has product_id, Model_Product does not) #}
+            {% if not order and not product.product_id %}
             <h2>{{ 'Deployment Settings'|trans }}</h2>
             
             {# Fetch data from Pterodactyl #}
@@ -35,37 +38,23 @@
             </div>
 
             <div class="mb-3 row" id="node_selector_group" {% if product.config.location_id %}style="display:none;"{% endif %}>
-                <label class="form-label col-3 col-form-label">{{ 'Specific Node(s)'|trans }}:</label>
+                <label class="form-label col-3 col-form-label">{{ 'Available Nodes'|trans }}:</label>
                 <div class="col">
                     {% if nodes %}
-                        <div class="form-check">
-                            <input class="form-check-input" type="radio" name="config[node_selection_mode]" value="single" id="node_mode_single" {% if not product.config.node_selection_mode or product.config.node_selection_mode == 'single' %}checked{% endif %} onchange="toggleNodeSelectionMode()">
-                            <label class="form-check-label" for="node_mode_single">{{ 'Single Node (Forced)'|trans }}</label>
-                        </div>
-                        <div class="form-check mb-2">
-                            <input class="form-check-input" type="radio" name="config[node_selection_mode]" value="client" id="node_mode_client" {% if product.config.node_selection_mode == 'client' %}checked{% endif %} onchange="toggleNodeSelectionMode()">
-                            <label class="form-check-label" for="node_mode_client">{{ 'Client Selection (User chooses from list)'|trans }}</label>
-                        </div>
-
-                        <div id="single_node_select" {% if product.config.node_selection_mode == 'client' %}style="display:none;"{% endif %}>
-                            <select class="form-select" name="config[node_id]">
-                                {% for node in nodes %}
-                                <option value="{{ node.id }}" {% if product.config.node_id == node.id %}selected{% endif %}>{{ node.name }} (ID: {{ node.id }})</option>
-                                {% endfor %}
-                            </select>
-                            <div class="form-text">{{ 'Server will be created on this specific node.'|trans }}</div>
-                        </div>
-
-                        <div id="client_node_select" {% if not product.config.node_selection_mode or product.config.node_selection_mode == 'single' %}style="display:none;"{% endif %}>
+                        <div id="node_select_list">
                             {% for node in nodes %}
                                 <div class="form-check">
-                                    <input class="form-check-input" type="checkbox" name="config[selectable_nodes][]" value="{{ node.id }}" id="selectable_node_{{ node.id }}" {% if node.id in product.config.selectable_nodes %}checked{% endif %}>
+                                    <input class="form-check-input" type="checkbox" name="config[selectable_nodes][]" value="{{ node.id }}" id="selectable_node_{{ node.id }}" {% if node.id in product.config.selectable_nodes or (product.config.node_id == node.id) %}checked{% endif %}>
                                     <label class="form-check-label" for="selectable_node_{{ node.id }}">
                                         {{ node.name }} (ID: {{ node.id }})
                                     </label>
                                 </div>
                             {% endfor %}
-                            <div class="form-text">{{ 'Select the nodes that the client can choose from during checkout.'|trans }}</div>
+                            <div class="form-text">{{ 'Select the nodes that can be used for this product. The system will automatically select a node with available resources from this list.'|trans }}</div>
+                            <div class="mt-2">
+                                <a href="#" onclick="selectAllNodes(true); return false;" class="btn btn-sm btn-outline-secondary">{{ 'Select All'|trans }}</a>
+                                <a href="#" onclick="selectAllNodes(false); return false;" class="btn btn-sm btn-outline-secondary">{{ 'Deselect All'|trans }}</a>
+                            </div>
                         </div>
                     {% else %}
                         <input type="number" class="form-control" name="config[node_id]" value="{{ product.config.node_id|default(1) }}">
@@ -137,21 +126,17 @@
                     document.getElementById('node_selector_group').style.display = 'none';
                     document.getElementById('location_selector_group').style.display = 'flex';
                     // Clear node input when location is selected
-                     // Note: We don't strictly clear it because backend prioritizes location_id check, but good for UI consistency
                 }
             }
 
-            function toggleNodeSelectionMode() {
-                var isClientMode = document.getElementById('node_mode_client').checked;
-                if (isClientMode) {
-                    document.getElementById('single_node_select').style.display = 'none';
-                    document.getElementById('client_node_select').style.display = 'block';
-                } else {
-                    document.getElementById('single_node_select').style.display = 'block';
-                    document.getElementById('client_node_select').style.display = 'none';
-                }
+            function selectAllNodes(select) {
+                var checkboxes = document.querySelectorAll('input[name="config[selectable_nodes][]"]');
+                checkboxes.forEach(function(checkbox) {
+                    checkbox.checked = select;
+                });
             }
             </script>
+            {% endif %}
 
             <hr>
 
