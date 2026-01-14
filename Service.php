@@ -226,6 +226,19 @@ class Service implements InjectionAwareInterface
             }
             $serverData = $this->createPterodactylServer($config, $client, $model, $order);
             
+            // Update config with the actual Node ID used
+            if (isset($serverData['node_id'])) {
+                $config['node_id'] = $serverData['node_id'];
+                $model->config = json_encode($config);
+                
+                // Also update the core Order config to ensure consistency across FOSSBilling
+                // This fixes the issue where order config shows outdated Node ID
+                if (is_object($order)) {
+                    $order->config = json_encode($config);
+                    $this->di['db']->store($order);
+                }
+            }
+
             $model->server_id = $serverData['id'];
             $model->server_identifier = $serverData['identifier'];
             $model->status = 'active';
@@ -679,22 +692,27 @@ class Service implements InjectionAwareInterface
             $serverData['oom_disabled'] = (bool)$config['oom_disabled'];
         }
 
+        // Process environment variables and handle Auto Port check
+        $autoPortEnabled = false;
+        if (!empty($config['auto_port'])) {
+            $autoPortEnabled = true;
+        } else {
+            // Check if any variable requests AUTO_PORT
+            foreach ($environment as $key => $value) {
+                if ($value === 'AUTO_PORT') {
+                    $autoPortEnabled = true;
+                    break;
+                }
+            }
+        }
+
         // Determine Node ID with Fallback and Stock Checks
         $nodeId = null;
         $requiredMemory = (int)($config['memory'] ?? 0);
         $requiredDisk = (int)($config['disk'] ?? 0);
 
-        // 1. Check for specific node ID in config (Admin set or Client Choice)
-        if (!empty($config['node_id'])) {
-            $nodeId = (int)$config['node_id'];
-        } 
-        // 2. Handle Client Selection Mode specific override (if passed differently)
-        elseif (isset($config['node_selection_mode']) && $config['node_selection_mode'] === 'client' && !empty($config['selected_node_id'])) {
-            $nodeId = (int)$config['selected_node_id'];
-        }
-
-        // 3. Location Auto-Selection (if no specific node set)
-        if (!$nodeId && !empty($config['location_id'])) {
+        // 1. Location Auto-Selection
+        if (!empty($config['location_id'])) {
             $nodesInLocation = $this->getNodesInLocation((int)$config['location_id']);
             $allowedNodes = $panelConfig['allowed_nodes'] ?? [];
             
@@ -707,6 +725,12 @@ class Service implements InjectionAwareInterface
                 // Check resources
                 try {
                     $this->checkNodeResources($node['id'], $requiredMemory, $requiredDisk);
+                    
+                    // Check port if needed
+                    if ($autoPortEnabled) {
+                         $api->findFreeAllocation($node['id']);
+                    }
+
                     $nodeId = $node['id'];
                     break; // Found a suitable node
                 } catch (\Exception $e) {
@@ -718,32 +742,49 @@ class Service implements InjectionAwareInterface
                 throw new \FOSSBilling\Exception('No suitable node found in the selected location with sufficient resources.');
             }
         }
+        // 2. Available Node Selection (Admin Pool)
+        else {
+            $selectableNodes = $config['selectable_nodes'] ?? [];
+            
+            // Legacy fallback: if single node_id is set but no list, treat as list of one
+            if (empty($selectableNodes) && !empty($config['node_id'])) {
+                $selectableNodes = [$config['node_id']];
+            }
 
-        // 4. Fallback to Global Default Node
-        if (!$nodeId) {
-            $nodeId = (int)($panelConfig['default_node'] ?? 0);
-        }
+            // Fallback to global default if nothing selected
+            if (empty($selectableNodes) && !empty($panelConfig['default_node'])) {
+                $selectableNodes = [$panelConfig['default_node']];
+            }
 
-        if (!$nodeId) {
-            throw new \FOSSBilling\Exception('No node selected for deployment. Please configure a node or location.');
-        }
+            if (empty($selectableNodes)) {
+                throw new \FOSSBilling\Exception('No nodes configured for this product.');
+            }
 
-        // Final Resource Check for the selected node (Validation)
-        $this->checkNodeResources($nodeId, $requiredMemory, $requiredDisk);
+            foreach ($selectableNodes as $candidateId) {
+                try {
+                    $this->checkNodeResources((int)$candidateId, $requiredMemory, $requiredDisk);
+                    
+                    // Check port if needed
+                    if ($autoPortEnabled) {
+                        // This throws if no allocation found
+                        $api->findFreeAllocation((int)$candidateId);
+                    }
+                    
+                    $nodeId = (int)$candidateId;
+                    break; 
+                } catch (\Exception $e) {
+                    // Node full or error, continue to next
+                    continue;
+                }
+            }
 
-        // Process environment variables and handle Auto Port
-        $autoPortEnabled = false;
-
-        // Check if any variable requests AUTO_PORT
-        foreach ($environment as $key => $value) {
-            if ($value === 'AUTO_PORT') {
-                $autoPortEnabled = true;
-                break;
+            if (!$nodeId) {
+                throw new \FOSSBilling\Exception('Los nodos disponibles para este servicio/categoria, estan llenos');
             }
         }
 
         // Handle Port Allocation
-        if ($autoPortEnabled || !empty($config['auto_port'])) {
+        if ($autoPortEnabled) {
             $allocation = $api->findFreeAllocation($nodeId);
             $allocationId = $allocation['id'];
             $port = $allocation['port'];
@@ -755,6 +796,8 @@ class Service implements InjectionAwareInterface
                 }
             }
         } else {
+            // Even if auto port is not enabled, we usually need a default allocation
+            // Pterodactyl requires at least one allocation
             $allocation = $api->findFreeAllocation($nodeId);
             $allocationId = $allocation['id'];
         }
@@ -777,8 +820,13 @@ class Service implements InjectionAwareInterface
         // Store both the admin ID (for API calls) and identifier (for display)
         $serverId = $response['attributes']['id'];
         $serverIdentifier = $response['attributes']['identifier'];
+        $actualNodeId = $response['attributes']['node'] ?? $nodeId;
         
-        return ['id' => $serverId, 'identifier' => $serverIdentifier];
+        return [
+            'id' => $serverId, 
+            'identifier' => $serverIdentifier,
+            'node_id' => $actualNodeId
+        ];
     }
 
     /**

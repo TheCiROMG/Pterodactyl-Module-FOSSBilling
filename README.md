@@ -16,8 +16,8 @@ A robust, secure, and feature-rich Pterodactyl integration for FOSSBilling. This
 
 ### 🔄 Intelligent Node Selection
 - **Location-Based Auto-Selection**: Automatically finds the best node in a selected location that has sufficient free RAM and Disk.
-- **Specific Node Assignment**: Option to force deployment to a specific node.
-- **Global Default**: Fallback to a default node if no specific location is requested.
+- **Admin-Defined Available Nodes**: For each product, administrators can define a pool of allowed nodes. The module will automatically pick a node from that pool with enough free RAM, Disk, and (optionally) ports.
+- **Exhaustion Handling**: If none of the selected nodes can host the service, the order fails with a clear error message so you know that all nodes for that service/category are full.
 
 ### 🔒 Enhanced Security & SSO
 - **WemX SSO Support**: Native integration with the [WemX SSO Plugin](https://github.com/WemxPro/sso-pterodactyl) for secure, one-click login from FOSSBilling to Pterodactyl.
