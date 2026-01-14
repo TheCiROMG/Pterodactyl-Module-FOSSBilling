@@ -86,6 +86,17 @@
     <form action="{{ 'api/admin/servicepterodactyl/update'|link }}" method="post" class="api-form" data-api-msg="{{ 'Server updated'|trans }}">
         <input type="hidden" name="CSRFToken" value="{{ CSRFToken }}"/>
         
+        <h2>{{ 'Deployment Details'|trans }}</h2>
+        <div class="mb-3 row">
+            <label class="form-label col-3 col-form-label">{{ 'Node ID'|trans }}:</label>
+            <div class="col">
+                <input type="number" class="form-control" name="config[node_id]" value="{{ service.config.node_id }}">
+                <small class="form-hint">{{ 'The internal ID of the node where this server is deployed. Change this only if you need to correct the database record.'|trans }}</small>
+            </div>
+        </div>
+        
+        <hr>
+
         <h2>{{ 'Resource Limits'|trans }}</h2>
         <div class="mb-3 row">
             <label class="form-label col-3 col-form-label">{{ 'Memory (MB)'|trans }}:</label>
