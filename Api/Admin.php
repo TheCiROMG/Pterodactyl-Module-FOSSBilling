@@ -27,6 +27,7 @@ class Admin extends \Api_Abstract
             'api_key' => $systemService->getParamValue('servicepterodactyl_api_key', ''),
             'sso_secret' => $systemService->getParamValue('servicepterodactyl_sso_secret', ''),
             'allowed_nodes' => json_decode($systemService->getParamValue('servicepterodactyl_allowed_nodes', '[]'), true),
+            'default_node' => (int) $systemService->getParamValue('servicepterodactyl_default_node', 0),
         ];
     }
 
@@ -57,6 +58,10 @@ class Admin extends \Api_Abstract
         } else {
             // If empty (unchecked all), save empty array
             $systemService->setParamValue('servicepterodactyl_allowed_nodes', json_encode([]));
+        }
+        
+        if (isset($data['default_node'])) {
+            $systemService->setParamValue('servicepterodactyl_default_node', (int) $data['default_node']);
         }
         
         return true;
