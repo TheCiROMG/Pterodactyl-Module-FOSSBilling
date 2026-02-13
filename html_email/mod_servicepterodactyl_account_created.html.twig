@@ -1,0 +1,11 @@
+{% block subject %}Account Created{% endblock %}
+{% block content %}
+<p>Hello {{ c.first_name }} {{ c.last_name }},</p>
+<p>An account has been created for you on the Pterodactyl Panel.</p>
+<p><strong>Panel URL:</strong> <a href="{{ panel_url }}" target="_blank">{{ panel_url }}</a></p>
+<p><strong>Username:</strong> {{ username }}</p>
+<p><strong>Password:</strong> {{ password }}</p>
+<p><strong>Email:</strong> {{ c.email }}</p>
+<p>Please change your password after logging in.</p>
+<p class="signature">{{ guest.system_company.signature }}</p>
+{% endblock %}

@@ -226,9 +226,44 @@ class Service implements InjectionAwareInterface
             }
             $serverData = $this->createPterodactylServer($config, $client, $model, $order);
             
+            $configUpdated = false;
+
             // Update config with the actual Node ID used
             if (isset($serverData['node_id'])) {
                 $config['node_id'] = $serverData['node_id'];
+                $configUpdated = true;
+            }
+
+            // Save initial password if new user created
+            if (isset($serverData['password'])) {
+                $config['initial_password'] = $serverData['password'];
+                $config['panel_username'] = $serverData['username'];
+                $configUpdated = true;
+
+                // Send account created email
+                try {
+                    $emailService = $this->di['mod_service']('email');
+                    $globalConfig = $this->getGlobalPanelConfig();
+                    $panelUrl = isset($globalConfig['panel_url']) ? rtrim($globalConfig['panel_url'], '/') : '';
+                    
+                    $emailService->sendTemplate([
+                        'to_client' => $client->id,
+                        'code' => 'mod_servicepterodactyl_account_created',
+                        'username' => $serverData['username'],
+                        'password' => $serverData['password'],
+                        'panel_url' => $panelUrl,
+                        'client' => $client
+                    ]);
+                } catch (\Exception $e) {
+                    if (isset($this->di['logger'])) {
+                        try {
+                            $this->di['logger']->error('Failed to send Pterodactyl account email: ' . $e->getMessage());
+                        } catch (\Throwable $t) {}
+                    }
+                }
+            }
+
+            if ($configUpdated) {
                 $model->config = json_encode($config);
                 
                 // Also update the core Order config to ensure consistency across FOSSBilling
@@ -265,7 +300,9 @@ class Service implements InjectionAwareInterface
                     // This prevents the order from being stuck in "Active" if Pterodactyl API fails
                     // (e.g. server already suspended or connection issue)
                     if (isset($this->di['logger'])) {
-                        $this->di['logger']->error('Failed to suspend Pterodactyl server ' . $model->server_id . ': ' . $e->getMessage());
+                        try {
+                            $this->di['logger']->error('Failed to suspend Pterodactyl server ' . $model->server_id . ': ' . $e->getMessage());
+                        } catch (\Throwable $t) {}
                     }
                 }
             }
@@ -292,7 +329,9 @@ class Service implements InjectionAwareInterface
                 } catch (\Exception $e) {
                     // Log error but continue to update status
                     if (isset($this->di['logger'])) {
-                        $this->di['logger']->error('Failed to unsuspend Pterodactyl server ' . $model->server_id . ': ' . $e->getMessage());
+                        try {
+                            $this->di['logger']->error('Failed to unsuspend Pterodactyl server ' . $model->server_id . ': ' . $e->getMessage());
+                        } catch (\Throwable $t) {}
                     }
                 }
             }
@@ -354,7 +393,9 @@ class Service implements InjectionAwareInterface
                     } catch (\Exception $e) {
                         // If server is already gone or API error, log it but proceed to mark as deleted locally
                         if (isset($this->di['logger'])) {
-                            $this->di['logger']->error('Failed to delete Pterodactyl server ' . $model->server_id . ': ' . $e->getMessage());
+                            try {
+                                $this->di['logger']->error('Failed to delete Pterodactyl server ' . $model->server_id . ': ' . $e->getMessage());
+                            } catch (\Throwable $t) {}
                         }
                     }
                 }
@@ -622,7 +663,9 @@ class Service implements InjectionAwareInterface
             return $api->getSSORedirect($userId, $ssoSecret);
         } catch (\Exception $e) {
             if (isset($this->di['logger'])) {
-                $this->di['logger']->error('Pterodactyl SSO Error: ' . $e->getMessage());
+                try {
+                    $this->di['logger']->error('Pterodactyl SSO Error: ' . $e->getMessage());
+                } catch (\Throwable $t) {}
             }
             return '';
         }
@@ -636,9 +679,19 @@ class Service implements InjectionAwareInterface
         $api = $this->getApi($config);
         $panelConfig = $this->panelConfig ?? $this->getPanelConfig($config);
         
+        // Resolve host to IP if FQDN is provided
+        $resolveHostToIp = function(string $host): ?string {
+            if (filter_var($host, FILTER_VALIDATE_IP)) {
+                return $host;
+            }
+            $ip = gethostbyname($host);
+            return $ip && $ip !== $host ? $ip : null;
+        };
+        
         // First, we need to create or get the user
         $userEmail = $client->email ?? 'noemail@example.com';
-        $userId = $this->getOrCreateUser($userEmail, $client);
+        $userData = $this->getOrCreateUser($userEmail, $client);
+        $userId = $userData['id'];
         
         // Get egg information and prepare environment variables
         $eggId = (int)($config['egg_id'] ?? 0);
@@ -658,6 +711,20 @@ class Service implements InjectionAwareInterface
             $serverName = $this->parseVariables($pattern, $client, $model->id, $order);
         }
 
+        $externalId = 'fb-' . (is_object($order) ? $order->id : $model->id);
+        
+        // Idempotent guard: if a server with this external_id already exists, reuse it
+        try {
+            $existing = $api->getServerByExternalId($externalId);
+            if (!empty($existing['attributes']['id'])) {
+                return [
+                    'id' => $existing['attributes']['id'],
+                    'identifier' => $existing['attributes']['identifier'],
+                    'node_id' => $existing['attributes']['node'] ?? null,
+                ];
+            }
+        } catch (\Exception $ignore) {}
+        
         $serverData = [
             'name' => $serverName,
             'user' => $userId,
@@ -677,6 +744,7 @@ class Service implements InjectionAwareInterface
                 'allocations' => (int)($config['allocations'] ?? 0),
                 'backups' => (int)($config['backups'] ?? 0),
             ],
+            'external_id' => $externalId,
         ];
 
         if (!empty($config['server_description'])) {
@@ -690,19 +758,23 @@ class Service implements InjectionAwareInterface
         
         $serverData['oom_disabled'] = !empty($config['oom_disabled'] ?? false);
 
-        // Process environment variables and handle Auto Port check
-        $autoPortEnabled = false;
+        // Process environment variables and handle Auto Port check (collect multiple AUTO_PORT requests)
+        $autoPortRequests = [];
         if (!empty($config['auto_port'])) {
-            $autoPortEnabled = true;
-        } else {
-            // Check if any variable requests AUTO_PORT
             foreach ($environment as $key => $value) {
                 if ($value === 'AUTO_PORT') {
-                    $autoPortEnabled = true;
-                    break;
+                    $autoPortRequests[] = $key;
+                }
+            }
+        } else {
+            foreach ($environment as $key => $value) {
+                if ($value === 'AUTO_PORT') {
+                    $autoPortRequests[] = $key;
                 }
             }
         }
+
+        $autoPortEnabled = !empty($autoPortRequests);
 
         // Determine Node ID with Fallback and Stock Checks
         $nodeId = null;
@@ -781,28 +853,64 @@ class Service implements InjectionAwareInterface
             }
         }
 
-        // Handle Port Allocation
-        if ($autoPortEnabled) {
-            $allocation = $api->findFreeAllocation($nodeId);
-            $allocationId = $allocation['id'];
-            $port = $allocation['port'];
-            
-            // Replace AUTO_PORT in environment variables with the actual port
-            foreach ($environment as $key => $value) {
-                if ($value === 'AUTO_PORT') {
-                    $environment[$key] = (string)$port;
+        // Handle Port Allocation (support multiple AUTO_PORT variables) using existing free allocations
+        $defaultAllocationId = null;
+        $additionalAllocationIds = [];
+        if (!empty($autoPortRequests)) {
+            $portCount = count($autoPortRequests) + 1;
+            $bulk = [];
+            $preferredHost = null;
+            $portStart = 25565;
+            $portEnd = null;
+            $globalMap = $panelConfig['node_allocation_map'] ?? [];
+            if (is_array($globalMap) && isset($globalMap[$nodeId])) {
+                $map = $globalMap[$nodeId];
+                $preferredHost = $map['host'] ?? null;
+                $portStart = isset($map['port_start']) ? (int)$map['port_start'] : $portStart;
+                $portEnd = isset($map['port_end']) ? (int)$map['port_end'] : null;
+            }
+            $preferredIp = $preferredHost ? $resolveHostToIp($preferredHost) ?? $preferredHost : null;
+            try {
+                $bulk = $api->findFreeAllocations($nodeId, $portCount, $preferredIp);
+            } catch (\Exception $e) {
+                $bulk = [];
+            }
+            $missing = $portCount - count($bulk);
+            if ($missing > 0) {
+                for ($i = 0; $i < $missing; $i++) {
+                    $created = $api->findFreeAllocation($nodeId, $portStart, $preferredIp, $portEnd);
+                    $bulk[] = $created;
+                    $portStart = $created['port'] + 1;
                 }
             }
-        } else {
-            // Even if auto port is not enabled, we usually need a default allocation
-            // Pterodactyl requires at least one allocation
+            if (!empty($bulk)) {
+                $defaultAllocationId = $bulk[0]['id'];
+                for ($i = 0; $i < count($autoPortRequests); $i++) {
+                    $environment[$autoPortRequests[$i]] = (string)$bulk[$i + 1]['port'];
+                    $additionalAllocationIds[] = $bulk[$i + 1]['id'];
+                }
+            }
+        }
+        if ($defaultAllocationId === null) {
+            // Always ensure a default allocation exists
             $allocation = $api->findFreeAllocation($nodeId);
-            $allocationId = $allocation['id'];
+            $defaultAllocationId = $allocation['id'];
         }
         
+        // Set default allocation in payload and include additional allocations (WemX-style)
         $serverData['allocation'] = [
-            'default' => $allocationId,
+            'default' => $defaultAllocationId,
         ];
+        if (!empty($additionalAllocationIds)) {
+            $serverData['allocation']['additional'] = $additionalAllocationIds;
+        }
+        // Ensure feature limits allow multiple allocations at creation time
+        if (!empty($additionalAllocationIds)) {
+            $serverData['feature_limits']['allocations'] = max(
+                (int)($serverData['feature_limits']['allocations'] ?? 0),
+                1 + count($additionalAllocationIds)
+            );
+        }
         $serverData['environment'] = $environment;
 
         // Add feature limits (if supported by Pterodactyl API structure)
@@ -815,16 +923,49 @@ class Service implements InjectionAwareInterface
             throw new \FOSSBilling\Exception('Failed to create server on Pterodactyl');
         }
 
+        // After creation, add additional allocations via build update if needed
+        if (!empty($additionalAllocationIds)) {
+            try {
+                $buildPayload = [
+                    'allocation' => $defaultAllocationId,
+                    'add_allocations' => $additionalAllocationIds,
+                    'memory' => (int)$serverData['limits']['memory'],
+                    'swap' => (int)$serverData['limits']['swap'],
+                    'disk' => (int)$serverData['limits']['disk'],
+                    'io' => (int)$serverData['limits']['io'],
+                    'cpu' => (int)$serverData['limits']['cpu'],
+                ];
+                if (isset($serverData['limits']['threads'])) {
+                    $buildPayload['threads'] = $serverData['limits']['threads'];
+                }
+                $api->updateServerBuild($response['attributes']['id'], $buildPayload);
+            } catch (\Exception $e) {
+                // Non-fatal: server remains created with default allocation
+                if (isset($this->di['logger'])) {
+                    try {
+                        $this->di['logger']->error('Failed to add additional allocations: ' . $e->getMessage());
+                    } catch (\Throwable $t) {}
+                }
+            }
+        }
+
         // Store both the admin ID (for API calls) and identifier (for display)
         $serverId = $response['attributes']['id'];
         $serverIdentifier = $response['attributes']['identifier'];
         $actualNodeId = $response['attributes']['node'] ?? $nodeId;
         
-        return [
+        $result = [
             'id' => $serverId, 
             'identifier' => $serverIdentifier,
             'node_id' => $actualNodeId
         ];
+
+        if (!empty($userData['is_new']) && !empty($userData['password'])) {
+            $result['password'] = $userData['password'];
+            $result['username'] = $userData['username'];
+        }
+
+        return $result;
     }
 
     /**
@@ -898,8 +1039,9 @@ class Service implements InjectionAwareInterface
 
     /**
      * Get or create a user on Pterodactyl panel
+     * Returns array with id, and optionally password and username if new
      */
-    private function getOrCreateUser(string $email, $client): int
+    private function getOrCreateUser(string $email, $client): array
     {
         try {
             $api = $this->getApi();
@@ -907,16 +1049,22 @@ class Service implements InjectionAwareInterface
             $response = $api->getUsers($email);
             
             if (!empty($response['data'])) {
-                return $response['data'][0]['attributes']['id'];
+                return [
+                    'id' => $response['data'][0]['attributes']['id'],
+                    'is_new' => false
+                ];
             }
             
             // Create new user if not found
+            $username = $this->generateUsername($email);
+            $password = $this->generateRandomPassword();
+            
             $userData = [
                 'email' => $email,
-                'username' => $this->generateUsername($email),
+                'username' => $username,
                 'first_name' => $client->first_name ?? 'Client',
                 'last_name' => $client->last_name ?? 'User',
-                'password' => $this->generateRandomPassword(),
+                'password' => $password,
             ];
             
             $response = $api->createUser($userData);
@@ -925,7 +1073,12 @@ class Service implements InjectionAwareInterface
                 throw new \FOSSBilling\Exception('Failed to create user on Pterodactyl');
             }
             
-            return $response['attributes']['id'];
+            return [
+                'id' => $response['attributes']['id'],
+                'is_new' => true,
+                'username' => $username,
+                'password' => $password
+            ];
             
         } catch (\Exception $e) {
             throw new \FOSSBilling\Exception('Failed to get or create user: ' . $e->getMessage());
@@ -1264,7 +1417,17 @@ class Service implements InjectionAwareInterface
         return new PterodactylApi(
             $panelConfig['panel_url'],
             $panelConfig['api_key'],
-            isset($this->di['logger']) ? $this->di['logger'] : null
+            null
+        );
+    }
+    
+    private function getClientApi(): PterodactylApi
+    {
+        $global = $this->getGlobalPanelConfig();
+        return new PterodactylApi(
+            $global['panel_url'],
+            $global['client_api_key'],
+            null
         );
     }
 
@@ -1285,6 +1448,7 @@ class Service implements InjectionAwareInterface
             'panel_url' => $orderConfig['panel_url'] ?? $globalConfig['panel_url'] ?? '',
             'api_key' => $orderConfig['api_key'] ?? $globalConfig['api_key'] ?? '',
             'sso_secret' => $orderConfig['sso_secret'] ?? $globalConfig['sso_secret'] ?? '',
+            'client_api_key' => $orderConfig['client_api_key'] ?? $globalConfig['client_api_key'] ?? '',
             'allowed_nodes' => $globalConfig['allowed_nodes'] ?? [],
             'default_node' => $globalConfig['default_node'] ?? 0,
         ];
@@ -1305,6 +1469,7 @@ class Service implements InjectionAwareInterface
                 'panel_url' => $settingService->getParamValue('servicepterodactyl_panel_url', ''),
                 'api_key' => $settingService->getParamValue('servicepterodactyl_api_key', ''),
                 'sso_secret' => $settingService->getParamValue('servicepterodactyl_sso_secret', ''),
+                'client_api_key' => $settingService->getParamValue('servicepterodactyl_client_api_key', ''),
                 'allowed_nodes' => json_decode($settingService->getParamValue('servicepterodactyl_allowed_nodes', '[]'), true) ?? [],
                 'default_node' => $settingService->getParamValue('servicepterodactyl_default_node', 0),
             ];

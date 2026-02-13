@@ -64,7 +64,13 @@ class PterodactylApi
             }
 
             if ($this->logger) {
-                $this->logger->error($errorMessage);
+                try {
+                    if (method_exists($this->logger, 'error')) {
+                        $this->logger->error($errorMessage);
+                    }
+                } catch (\Throwable $logErr) {
+                    // Ignore logger failures to avoid breaking provisioning
+                }
             }
             
             throw new \FOSSBilling\Exception($errorMessage);
@@ -88,7 +94,7 @@ class PterodactylApi
         return $this->request('GET', '/api/application/locations');
     }
 
-    public function getEggs(int $nestId = null): array
+    public function getEggs(?int $nestId = null): array
     {
         $endpoint = $nestId ? "/api/application/nests/{$nestId}/eggs" : '/api/application/nests?include=eggs';
         return $this->request('GET', $endpoint);
@@ -106,7 +112,7 @@ class PterodactylApi
     
     public function updateServerBuild(int $serverId, array $data): array
     {
-        return $this->request('POST', "/api/application/servers/{$serverId}/build", $data);
+        return $this->request('PATCH', "/api/application/servers/{$serverId}/build", $data);
     }
     
     public function updateServerStartup(int $serverId, array $data): array
@@ -134,12 +140,44 @@ class PterodactylApi
         return $this->request('GET', "/api/application/servers/{$serverId}");
     }
     
+    /**
+     * Get server by external_id (idempotent lookup)
+     */
+    public function getServerByExternalId(string $externalId): array
+    {
+        return $this->request('GET', "/api/application/servers/external/{$externalId}");
+    }
+    
     public function getServerStartup(int $serverId): array
     {
         return $this->request('GET', "/api/application/servers/{$serverId}/startup");
     }
 
-    public function getUsers(string $filterEmail = null): array
+    public function clientNetworkAllocations(string $uuidShort): array
+    {
+        return $this->request('GET', "/api/client/servers/{$uuidShort}/network/allocations");
+    }
+    
+    public function clientNetworkAssignAllocation(string $uuidShort): array
+    {
+        return $this->request('POST', "/api/client/servers/{$uuidShort}/network/allocations");
+    }
+    
+    public function clientNetworkSetPrimary(string $uuidShort, string $allocationId): array
+    {
+        return $this->request('POST', "/api/client/servers/{$uuidShort}/network/allocations/{$allocationId}/primary");
+    }
+    
+    public function clientNetworkSetNote(string $uuidShort, string $allocationId, string $note): array
+    {
+        return $this->request('POST', "/api/client/servers/{$uuidShort}/network/allocations/{$allocationId}", ['notes' => $note]);
+    }
+    
+    public function clientNetworkDelete(string $uuidShort, string $allocationId): array
+    {
+        return $this->request('DELETE', "/api/client/servers/{$uuidShort}/network/allocations/{$allocationId}");
+    }
+    public function getUsers(?string $filterEmail = null): array
     {
         $endpoint = '/api/application/users';
         if ($filterEmail) {
@@ -174,13 +212,11 @@ class PterodactylApi
     /**
      * Find a free allocation on a node or create one if possible.
      */
-    public function findFreeAllocation(int $nodeId, int $startPort = 25565): array
+    public function findFreeAllocation(int $nodeId, int $startPort = 25565, ?string $preferredIp = null, ?int $endPort = null): array
     {
-        // 1. Get existing allocations
         $response = $this->getAllocations($nodeId);
         $allocations = $response['data'] ?? [];
         
-        // 2. Check for an unassigned allocation
         foreach ($allocations as $allocation) {
             if (empty($allocation['attributes']['assigned'])) {
                 return [
@@ -191,15 +227,11 @@ class PterodactylApi
             }
         }
         
-        // 3. If none found, we need to create one.
-        // We need to find a free port first.
-        // Get all used ports from allocations
         $usedPorts = [];
         foreach ($allocations as $allocation) {
             $usedPorts[] = $allocation['attributes']['port'];
         }
         
-        // Find a port that is NOT in the used list
         $port = $startPort;
         $maxTries = 1000;
         
@@ -208,24 +240,26 @@ class PterodactylApi
                 break;
             }
             $port++;
+            if ($endPort && $port > $endPort) {
+                throw new \FOSSBilling\Exception('No free ports available within the specified range.');
+            }
         }
         
-        // Create the allocation
+        $targetIp = $preferredIp;
+        if (!$targetIp) {
+            $ips = array_map(function($a) { return $a['attributes']['ip']; }, $allocations);
+            $counts = array_count_values($ips);
+            arsort($counts);
+            $targetIp = key($counts);
+        }
+        if (!$targetIp) {
+            $node = $this->getNode($nodeId);
+            $targetIp = $node['attributes']['fqdn'] ?? '0.0.0.0';
+        }
         $allocationData = [
-            'ip' => '0.0.0.0', // Ideally this should be the node's IP, but 0.0.0.0 often works as wildcard alias
+            'ip' => $targetIp,
             'ports' => [(string)$port]
         ];
-        
-        // Try to fetch node IP to be more precise
-        try {
-            $node = $this->getNode($nodeId);
-            // If node has a specific IP for allocations, use it. 
-            // Often it's not explicitly in 'attributes' in a simple way for allocation creation,
-            // but we can try to use the wildcard or look at existing allocations.
-            // Pterodactyl usually requires a valid IP on the node.
-        } catch (\Exception $e) {
-            // Ignore
-        }
 
         $response = $this->createAllocation($nodeId, $allocationData);
         
@@ -239,6 +273,57 @@ class PterodactylApi
         
         throw new \FOSSBilling\Exception('Failed to create new allocation.');
     }
+
+    /**
+     * Find multiple free allocations on a node (does not create new ones).
+     * Returns up to $count unassigned allocations, preferring a specific IP if provided.
+     */
+    public function findFreeAllocations(int $nodeId, int $count, ?string $preferredIp = null): array
+    {
+        $response = $this->getAllocations($nodeId);
+        $allocations = $response['data'] ?? [];
+        $free = [];
+        foreach ($allocations as $allocation) {
+            $attr = $allocation['attributes'];
+            if (empty($attr['assigned'])) {
+                $free[] = [
+                    'id' => $attr['id'],
+                    'port' => $attr['port'],
+                    'ip' => $attr['ip'],
+                ];
+            }
+        }
+        if ($preferredIp) {
+            $preferred = array_values(array_filter($free, function($a) use ($preferredIp) {
+                return $a['ip'] === $preferredIp;
+            }));
+            if (count($preferred) >= $count) {
+                usort($preferred, function($a, $b) {
+                    return $a['port'] <=> $b['port'];
+                });
+                return array_slice($preferred, 0, $count);
+            }
+            // Fallback: take as many preferred as possible, then fill from others
+            $others = array_values(array_filter($free, function($a) use ($preferredIp) {
+                return $a['ip'] !== $preferredIp;
+            }));
+            usort($preferred, function($a, $b) { return $a['port'] <=> $b['port']; });
+            usort($others, function($a, $b) { return [$a['ip'], $a['port']] <=> [$b['ip'], $b['port']]; });
+            $merged = array_merge($preferred, $others);
+            if (count($merged) < $count) {
+                throw new \FOSSBilling\Exception('Not enough free allocations available on node.');
+            }
+            return array_slice($merged, 0, $count);
+        }
+        usort($free, function($a, $b) {
+            return [$a['ip'], $a['port']] <=> [$b['ip'], $b['port']];
+        });
+        if (count($free) < $count) {
+            throw new \FOSSBilling\Exception('Not enough free allocations available on node.');
+        }
+        return array_slice($free, 0, $count);
+    }
+
 
     /**
      * Get SSO redirect URL from WemX plugin

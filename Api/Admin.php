@@ -26,8 +26,10 @@ class Admin extends \Api_Abstract
             'panel_url' => $systemService->getParamValue('servicepterodactyl_panel_url', ''),
             'api_key' => $systemService->getParamValue('servicepterodactyl_api_key', ''),
             'sso_secret' => $systemService->getParamValue('servicepterodactyl_sso_secret', ''),
+            'client_api_key' => $systemService->getParamValue('servicepterodactyl_client_api_key', ''),
             'allowed_nodes' => json_decode($systemService->getParamValue('servicepterodactyl_allowed_nodes', '[]'), true),
             'default_node' => (int) $systemService->getParamValue('servicepterodactyl_default_node', 0),
+            'node_allocation_map' => json_decode($systemService->getParamValue('servicepterodactyl_node_allocation_map', '{}'), true),
         ];
     }
 
@@ -53,15 +55,34 @@ class Admin extends \Api_Abstract
             $systemService->setParamValue('servicepterodactyl_sso_secret', $data['sso_secret']);
         }
         
+        if (isset($data['client_api_key'])) {
+            $systemService->setParamValue('servicepterodactyl_client_api_key', $data['client_api_key']);
+        }
+        
         if (isset($data['allowed_nodes'])) {
             $systemService->setParamValue('servicepterodactyl_allowed_nodes', json_encode($data['allowed_nodes']));
-        } else {
-            // If empty (unchecked all), save empty array
-            $systemService->setParamValue('servicepterodactyl_allowed_nodes', json_encode([]));
         }
         
         if (isset($data['default_node'])) {
             $systemService->setParamValue('servicepterodactyl_default_node', (int) $data['default_node']);
+        }
+        
+        if (isset($data['node_allocation_map']) && is_array($data['node_allocation_map'])) {
+            // Sanitize: ensure host and ports are proper types
+            $map = [];
+            foreach ($data['node_allocation_map'] as $nodeId => $entry) {
+                $host = isset($entry['host']) ? trim($entry['host']) : '';
+                $port_start = isset($entry['port_start']) ? (int)$entry['port_start'] : null;
+                $port_end = isset($entry['port_end']) ? (int)$entry['port_end'] : null;
+                if ($host !== '' || $port_start !== null || $port_end !== null) {
+                    $map[(int)$nodeId] = [
+                        'host' => $host,
+                        'port_start' => $port_start,
+                        'port_end' => $port_end,
+                    ];
+                }
+            }
+            $systemService->setParamValue('servicepterodactyl_node_allocation_map', json_encode($map));
         }
         
         return true;

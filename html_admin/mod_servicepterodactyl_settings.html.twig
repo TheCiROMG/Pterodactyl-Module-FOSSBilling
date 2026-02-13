@@ -36,6 +36,9 @@
                 <a class="nav-link active" href="#tab-general" data-bs-toggle="tab">{{ 'General'|trans }}</a>
             </li>
             <li class="nav-item" role="presentation">
+                <a class="nav-link" href="#tab-nodeconfig" data-bs-toggle="tab">{{ 'Node Configuration'|trans }}</a>
+            </li>
+            <li class="nav-item" role="presentation">
                 <a class="nav-link" href="#tab-debug" data-bs-toggle="tab">{{ 'Debug'|trans }}</a>
             </li>
              <li class="nav-item" role="presentation">
@@ -64,6 +67,14 @@
                                 <div class="col">
                                     <input type="password" class="form-control" name="api_key" value="{{ settings.api_key|default('') }}" placeholder="ptla_...">
                                     <div class="form-text">{{ 'Application API key from Pterodactyl panel'|trans }}</div>
+                                </div>
+                            </div>
+
+                            <div class="mb-3 row">
+                                <label class="form-label col-3 col-form-label">{{ 'Client API Key'|trans }}:</label>
+                                <div class="col">
+                                    <input type="password" class="form-control" name="client_api_key" value="{{ settings.client_api_key|default('') }}" placeholder="ptlc_...">
+                                    <div class="form-text">{{ 'Admin Client API key for network operations (assign/set primary)'|trans }}</div>
                                 </div>
                             </div>
 
@@ -117,6 +128,53 @@
                         
                         <div class="card-footer text-end">
                             <button class="btn btn-primary" type="submit">{{ 'Save Settings'|trans }}</button>
+                        </div>
+                    </form>
+                </div>
+
+                <div class="tab-pane fade" id="tab-nodeconfig" role="tabpanel">
+                    <form method="post" action="{{ 'api/admin/servicepterodactyl/save_settings'|link }}" class="api-form save" data-api-msg="{{ 'Node configuration saved'|trans }}">
+                        <input type="hidden" name="CSRFToken" value="{{ CSRFToken }}"/>
+                        <div class="card-body">
+                            <h2>{{ 'Node Allocation Settings'|trans }}</h2>
+                            <p class="text-muted">{{ 'Define IP/FQDN and port ranges per Node used for allocations and AUTO_PORT.'|trans }}</p>
+                            {% set nodes = admin.servicepterodactyl_get_nodes() %}
+                            {% if nodes %}
+                                {% for node in nodes %}
+                                    <div class="card mb-3">
+                                        <div class="card-header">
+                                            {{ 'Node'|trans }}: {{ node.name }} (ID: {{ node.id }})
+                                        </div>
+                                        <div class="card-body">
+                                            <div class="mb-3 row">
+                                                <label class="form-label col-3 col-form-label">{{ 'IP or FQDN'|trans }}:</label>
+                                                <div class="col">
+                                                    <input type="text" class="form-control" name="node_allocation_map[{{ node.id }}][host]" value="{{ settings.node_allocation_map[node.id].host }}" placeholder="node1.example.com">
+                                                    <div class="form-text">{{ 'Must match an Address configured on the Node in Pterodactyl.'|trans }}</div>
+                                                </div>
+                                            </div>
+                                            <div class="mb-3 row">
+                                                <label class="form-label col-3 col-form-label">{{ 'Port Start'|trans }}:</label>
+                                                <div class="col">
+                                                    <input type="number" class="form-control" name="node_allocation_map[{{ node.id }}][port_start]" value="{{ settings.node_allocation_map[node.id].port_start|default(25565) }}">
+                                                </div>
+                                            </div>
+                                            <div class="mb-3 row">
+                                                <label class="form-label col-3 col-form-label">{{ 'Port End'|trans }}:</label>
+                                                <div class="col">
+                                                    <input type="number" class="form-control" name="node_allocation_map[{{ node.id }}][port_end]" value="{{ settings.node_allocation_map[node.id].port_end }}">
+                                                    <div class="form-text">{{ 'Optional: limit allocation creation within this range.'|trans }}</div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                {% endfor %}
+                            {% else %}
+                                <div class="alert alert-warning">{{ 'No nodes available. Save General settings and retest connection.'|trans }}</div>
+                            {% endif %}
+                        </div>
+                        <div class="card-footer text-end">
+                            <button class="btn btn-primary" type="submit">{{ 'Save'|trans }}</button>
                         </div>
                     </form>
                 </div>
