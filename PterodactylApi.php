@@ -81,7 +81,7 @@ class PterodactylApi
 
     public function getNodes(): array
     {
-        return $this->request('GET', '/api/application/nodes');
+        return $this->getAllPages('/api/application/nodes');
     }
 
     public function getNode(int $id): array
@@ -91,13 +91,40 @@ class PterodactylApi
 
     public function getLocations(): array
     {
-        return $this->request('GET', '/api/application/locations');
+        return $this->getAllPages('/api/application/locations');
     }
 
     public function getEggs(?int $nestId = null): array
     {
         $endpoint = $nestId ? "/api/application/nests/{$nestId}/eggs" : '/api/application/nests?include=eggs';
-        return $this->request('GET', $endpoint);
+        return $this->getAllPages($endpoint);
+    }
+
+    /**
+     * Helper to fetch all pages of a resource
+     */
+    private function getAllPages(string $endpoint): array
+    {
+        $results = ['data' => []];
+        $page = 1;
+        
+        do {
+            $separator = (strpos($endpoint, '?') === false) ? '?' : '&';
+            $response = $this->request('GET', $endpoint . $separator . 'page=' . $page);
+            
+            if (empty($response['data'])) {
+                break;
+            }
+            
+            $results['data'] = array_merge($results['data'], $response['data']);
+            
+            $meta = $response['meta']['pagination'] ?? [];
+            $totalPages = $meta['total_pages'] ?? 1;
+            $page++;
+            
+        } while ($page <= $totalPages);
+        
+        return $results;
     }
 
     public function getEgg(int $nestId, int $eggId): array
@@ -212,37 +239,78 @@ class PterodactylApi
     /**
      * Find a free allocation on a node or create one if possible.
      */
-    public function findFreeAllocation(int $nodeId, int $startPort = 25565, ?string $preferredIp = null, ?int $endPort = null): array
+    public function findFreeAllocation(
+        int $nodeId,
+        int $startPort = 25565,
+        ?string $preferredIp = null,
+        ?int $endPort = null,
+        array $excludeAllocationIds = [],
+        array $excludePorts = []
+    ): array
     {
         $response = $this->getAllocations($nodeId);
         $allocations = $response['data'] ?? [];
         
+        $excludedAllocationIdMap = array_fill_keys(array_map('intval', $excludeAllocationIds), true);
+        $excludedPortMap = array_fill_keys(array_map('intval', $excludePorts), true);
+
+        $firstMatch = null;
         foreach ($allocations as $allocation) {
-            if (empty($allocation['attributes']['assigned'])) {
-                return [
-                    'id' => $allocation['attributes']['id'],
-                    'port' => $allocation['attributes']['port'],
-                    'ip' => $allocation['attributes']['ip'],
-                ];
+            $attr = $allocation['attributes'] ?? [];
+            if (!empty($attr['assigned'])) {
+                continue;
+            }
+
+            $id = (int)($attr['id'] ?? 0);
+            $port = (int)($attr['port'] ?? 0);
+            $ip = (string)($attr['ip'] ?? '');
+
+            if ($id === 0 || $port === 0) {
+                continue;
+            }
+
+            if (isset($excludedAllocationIdMap[$id]) || isset($excludedPortMap[$port])) {
+                continue;
+            }
+
+            if (!is_null($preferredIp) && $ip === $preferredIp) {
+                return ['id' => $id, 'port' => $port, 'ip' => $ip];
+            }
+
+            if (is_null($firstMatch)) {
+                $firstMatch = ['id' => $id, 'port' => $port, 'ip' => $ip];
             }
         }
+
+        if (!is_null($firstMatch)) {
+            return $firstMatch;
+        }
         
-        $usedPorts = [];
+        $usedPorts = $excludedPortMap;
         foreach ($allocations as $allocation) {
-            $usedPorts[] = $allocation['attributes']['port'];
+            $attr = $allocation['attributes'] ?? [];
+            if (!isset($attr['port'])) {
+                continue;
+            }
+
+            $usedPorts[(int)$attr['port']] = true;
         }
         
         $port = $startPort;
         $maxTries = 1000;
         
         for ($i = 0; $i < $maxTries; $i++) {
-            if (!in_array($port, $usedPorts)) {
+            if (!isset($usedPorts[$port])) {
                 break;
             }
             $port++;
             if ($endPort && $port > $endPort) {
                 throw new \FOSSBilling\Exception('No free ports available within the specified range.');
             }
+        }
+
+        if (isset($usedPorts[$port])) {
+            throw new \FOSSBilling\Exception('No free ports available on node.');
         }
         
         $targetIp = $preferredIp;

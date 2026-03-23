@@ -80,11 +80,4 @@ class Client extends \Api_Abstract
         
         return $url;
     }
-
-    /**
-     * Get server info for client
-     *
-     * @param array $data
-     * @return array
-     */
 }

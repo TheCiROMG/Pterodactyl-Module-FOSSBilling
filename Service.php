@@ -31,13 +31,32 @@ class Service implements InjectionAwareInterface
     public function attachOrderConfig(\Model_Product $product, array $data): array
     {
         !empty($product->config) ? $config = json_decode($product->config, true) : $config = [];
-
-        // Validate required public variables
-        // We do NOT throw exceptions here to allow "Plug and Play" ordering even if the theme doesn't support custom fields.
-        // The user can configure variables in the Client Area after purchase.
         
-        // Merge product config with submitted data (submitted data overrides product defaults)
-        return array_merge($config, $data);
+        $cleanData = [];
+
+        // Validate Location Selection
+        if (isset($data['location_id']) && !empty($config['selectable_locations'])) {
+            // Ensure the selected location is in the allowed list
+            if (in_array($data['location_id'], $config['selectable_locations'])) {
+                $cleanData['location_id'] = $data['location_id'];
+            }
+        }
+
+        // Validate Configurable Variables
+        if (isset($data['variables']) && is_array($data['variables'])) {
+            $allowedVars = $config['variables_configurable'] ?? [];
+            foreach ($data['variables'] as $key => $value) {
+                // Only allow if variable is in allowed list
+                if (!empty($allowedVars[$key])) {
+                    $cleanData['variables'][$key] = $value;
+                }
+            }
+        }
+        
+        // Only merge specific allowed user inputs.
+        // We do NOT use array_replace_recursive with raw $data to prevent
+        // users from overriding resource limits (memory, disk, etc.) or other sensitive settings.
+        return array_replace_recursive($config, $cleanData);
     }
     
     /**
@@ -147,10 +166,6 @@ class Service implements InjectionAwareInterface
 
     public function create($order)
     {
-        // Debug log
-        $logFile = __DIR__ . '/service_log.txt';
-        $logMsg = date('Y-m-d H:i:s') . " - Create called for Order ID: " . ($order->id ?? 'unknown') . "\n";
-        
         try {
             // Ensure config is not empty
             $orderConfig = json_decode($order->config, true);
@@ -158,8 +173,6 @@ class Service implements InjectionAwareInterface
                 $orderConfig = [];
             }
             
-            $logMsg .= "Initial Order Config: " . json_encode($orderConfig) . "\n";
-
             // If product_id exists, merge with product config
             if (isset($order->product_id)) {
                 $product = $this->di['db']->load('product', $order->product_id);
@@ -167,8 +180,8 @@ class Service implements InjectionAwareInterface
                     $productConfig = json_decode($product->config, true);
                     if (is_array($productConfig)) {
                         // Product config defaults, overwritten by order config
-                        $orderConfig = array_merge($productConfig, $orderConfig);
-                        $logMsg .= "Merged Product Config. New keys: " . implode(',', array_keys($orderConfig)) . "\n";
+                        // Note: Sensitive resource limits should have been filtered in attachOrderConfig
+                        $orderConfig = array_replace_recursive($productConfig, $orderConfig);
                     }
                 }
             }
@@ -183,15 +196,14 @@ class Service implements InjectionAwareInterface
             $model->status = 'pending';
 
             $id = $this->di['db']->store($model);
-            $logMsg .= "Stored model. ID: " . $id . "\n";
 
-            file_put_contents($logFile, $logMsg, FILE_APPEND);
             return $model;
 
         } catch (\Exception $e) {
-            $errorMsg = "ERROR in create: " . $e->getMessage() . "\n" . $e->getTraceAsString() . "\n";
-            file_put_contents($logFile, $logMsg . $errorMsg, FILE_APPEND);
-            error_log($errorMsg);
+            $errorMsg = "ERROR in create: " . $e->getMessage();
+            if (isset($this->di['logger'])) {
+                $this->di['logger']->error($errorMsg);
+            }
             throw new \FOSSBilling\Exception('Failed to create service record: ' . $e->getMessage());
         }
     }
@@ -201,6 +213,56 @@ class Service implements InjectionAwareInterface
      */
     public function validate_config(array $config): bool
     {
+        if (!empty($config['location_id'])) {
+            $requiredMemory = (int)($config['memory'] ?? 0);
+            $requiredDisk = (int)($config['disk'] ?? 0);
+            
+            // Ensure we have API access
+            $this->panelConfig = $this->getPanelConfig($config);
+            
+            // Get nodes in location
+            $nodesInLocation = $this->getNodesInLocation((int)$config['location_id']);
+            $allowedNodes = $this->panelConfig['allowed_nodes'] ?? [];
+            
+            $availableNodeFound = false;
+            foreach ($nodesInLocation as $node) {
+                // Check if node is allowed globally
+                if (!empty($allowedNodes) && !in_array($node['id'], $allowedNodes)) {
+                    continue;
+                }
+                
+                // Check maintenance mode
+                if (!empty($node['maintenance_mode'])) {
+                    continue;
+                }
+                
+                // Calculate Memory
+                $totalMemory = $node['memory'];
+                $usedMemory = $node['allocated_resources']['memory'] ?? 0;
+                $memoryOverallocate = $node['memory_overallocate'] ?? 0;
+                
+                $totalMemoryAvailable = ($memoryOverallocate == -1) ? PHP_INT_MAX : $totalMemory * (1 + ($memoryOverallocate / 100));
+                $freeMemory = $totalMemoryAvailable - $usedMemory;
+
+                // Calculate Disk
+                $totalDisk = $node['disk'];
+                $usedDisk = $node['allocated_resources']['disk'] ?? 0;
+                $diskOverallocate = $node['disk_overallocate'] ?? 0;
+                
+                $totalDiskAvailable = ($diskOverallocate == -1) ? PHP_INT_MAX : $totalDisk * (1 + ($diskOverallocate / 100));
+                $freeDisk = $totalDiskAvailable - $usedDisk;
+
+                if ($freeMemory >= $requiredMemory && $freeDisk >= $requiredDisk) {
+                    $availableNodeFound = true;
+                    break;
+                }
+            }
+            
+            if (!$availableNodeFound) {
+                throw new \FOSSBilling\Exception('The selected location is currently full. Please choose another location.');
+            }
+        }
+        
         return true;
     }
 
@@ -560,12 +622,18 @@ class Service implements InjectionAwareInterface
             
             if (!empty($response['data'])) {
                 foreach ($response['data'] as $node) {
+                    $attr = $node['attributes'];
                     $nodes[] = [
-                        'id' => $node['attributes']['id'],
-                        'name' => $node['attributes']['name'],
-                        'location_id' => $node['attributes']['location_id'],
-                        'public' => $node['attributes']['public'],
-                        'maintenance' => $node['attributes']['maintenance_mode'],
+                        'id' => $attr['id'],
+                        'name' => $attr['name'],
+                        'location_id' => $attr['location_id'],
+                        'public' => $attr['public'],
+                        'maintenance' => $attr['maintenance_mode'],
+                        'memory' => $attr['memory'],
+                        'disk' => $attr['disk'],
+                        'memory_overallocate' => $attr['memory_overallocate'] ?? 0,
+                        'disk_overallocate' => $attr['disk_overallocate'] ?? 0,
+                        'allocated_resources' => $attr['allocated_resources'] ?? ['memory' => 0, 'disk' => 0],
                     ];
                 }
             }
@@ -875,11 +943,23 @@ class Service implements InjectionAwareInterface
             } catch (\Exception $e) {
                 $bulk = [];
             }
+            $excludeAllocationIds = array_values(array_filter(array_map(function ($a) {
+                return $a['id'] ?? null;
+            }, $bulk), function ($v) {
+                return !is_null($v);
+            }));
+            $excludePorts = array_values(array_filter(array_map(function ($a) {
+                return $a['port'] ?? null;
+            }, $bulk), function ($v) {
+                return !is_null($v);
+            }));
             $missing = $portCount - count($bulk);
             if ($missing > 0) {
                 for ($i = 0; $i < $missing; $i++) {
-                    $created = $api->findFreeAllocation($nodeId, $portStart, $preferredIp, $portEnd);
+                    $created = $api->findFreeAllocation($nodeId, $portStart, $preferredIp, $portEnd, $excludeAllocationIds, $excludePorts);
                     $bulk[] = $created;
+                    $excludeAllocationIds[] = $created['id'];
+                    $excludePorts[] = $created['port'];
                     $portStart = $created['port'] + 1;
                 }
             }
@@ -902,6 +982,7 @@ class Service implements InjectionAwareInterface
             'default' => $defaultAllocationId,
         ];
         if (!empty($additionalAllocationIds)) {
+            $additionalAllocationIds = array_values(array_unique($additionalAllocationIds));
             $serverData['allocation']['additional'] = $additionalAllocationIds;
         }
         // Ensure feature limits allow multiple allocations at creation time
@@ -1090,15 +1171,25 @@ class Service implements InjectionAwareInterface
      */
     private function generateUsername(string $email): string
     {
-        $username = explode('@', $email)[0];
-        $username = preg_replace('/[^a-zA-Z0-9]/', '', $username);
-        $username = substr($username, 0, 20);
-        
-        if (empty($username)) {
-            $username = 'user' . time();
+        $local = explode('@', $email)[0] ?? '';
+        $local = strtolower($local);
+        $local = preg_replace('/[^a-z0-9._-]/', '', $local);
+        $local = trim($local, '._-');
+
+        if (strlen($local) < 3) {
+            $local = 'user';
         }
-        
-        return strtolower($username);
+
+        $suffix = substr(md5(strtolower($email)), 0, 6);
+        $base = substr($local, 0, 20);
+        $username = $base . '_' . $suffix;
+
+        $username = trim($username, '._-');
+        if (strlen($username) < 3) {
+            $username = 'user_' . $suffix;
+        }
+
+        return $username;
     }
 
 

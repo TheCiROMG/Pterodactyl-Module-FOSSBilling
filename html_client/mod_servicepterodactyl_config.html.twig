@@ -1,0 +1,342 @@
+{% extends request.ajax ? "layout_blank.html.twig" : "layout_default.html.twig" %}
+
+{% block meta_title %}{{ 'Configure Service'|trans }}{% endblock %}
+
+{% block content_before %}{% endblock %}
+
+{% block content %}
+    {% set product = guest.product_get({ "id": request.product_id }) %}
+    
+    <div class="row">
+        <div class="col-md-12">
+            <div class="card">
+                <div class="card-header">
+                    <h3 class="card-title">{{ product.title }}</h3>
+                </div>
+                <div class="card-body">
+                    <form action="{{ 'order/add-to-cart'|link }}" method="post" id="pterodactyl-config-form">
+                        <input type="hidden" name="CSRFToken" value="{{ CSRFToken }}"/>
+                        <input type="hidden" name="id" value="{{ product.id }}"/>
+
+                        {# Standard Resource Fields (Hidden by default if plans are used) #}
+                        <div id="resource-fields" style="display: none;">
+                            <input type="hidden" name="config[memory]" id="config_memory" value="{{ product.config.memory }}">
+                            <input type="hidden" name="config[swap]" id="config_swap" value="{{ product.config.swap }}">
+                            <input type="hidden" name="config[disk]" id="config_disk" value="{{ product.config.disk }}">
+                            <input type="hidden" name="config[cpu]" id="config_cpu" value="{{ product.config.cpu }}">
+                            <input type="hidden" name="config[io]" id="config_io" value="{{ product.config.io }}">
+                            <input type="hidden" name="config[databases]" id="config_databases" value="{{ product.config.databases }}">
+                            <input type="hidden" name="config[allocations]" id="config_allocations" value="{{ product.config.allocations }}">
+                            <input type="hidden" name="config[backups]" id="config_backups" value="{{ product.config.backups }}">
+                            
+                            {# Location Selection Logic #}
+                            {% set locations = guest.servicepterodactyl_get_locations({ "product_id": product.id }) %}
+                            {% set selected_locations = product.config.selectable_locations %}
+                            
+                            {% if selected_locations is defined and selected_locations is not empty %}
+                                </div> {# Close hidden resource-fields temporarily to show location #}
+                                <div class="mb-4">
+                                    <label class="form-label h5">{{ 'Server Location'|trans }}</label>
+                                    <select name="config[location_id]" class="form-select" required>
+                                        <option value="" disabled selected>{{ 'Select a location'|trans }}</option>
+                                        {% for location in locations %}
+                                            {% if location.id in selected_locations %}
+                                                <option value="{{ location.id }}" 
+                                                        {% if location.id == product.config.location_id and (location.is_full is not defined or not location.is_full) %}selected{% endif %}
+                                                        {% if location.is_full is defined and location.is_full %}disabled{% endif %}>
+                                                    {{ location.short }} - {{ location.long }}
+                                                    {% if location.is_full is defined and location.is_full %}({{ 'Full'|trans }}){% endif %}
+                                                </option>
+                                            {% endif %}
+                                        {% endfor %}
+                                    </select>
+                                    <div class="form-text">{{ 'Choose where your server will be deployed.'|trans }}</div>
+                                </div>
+                                <div style="display: none;"> {# Re-open hidden div for remaining fields #}
+                            {% else %}
+                                <input type="hidden" name="config[location_id]" id="config_location_id" value="{{ product.config.location_id }}">
+                            {% endif %}
+
+                            <input type="hidden" name="config[egg_id]" id="config_egg_id" value="{{ product.config.egg_id }}">
+                            <input type="hidden" name="config[plan_id]" id="config_plan_id" value="">
+                        </div>
+
+                        {# Configurable Variables Section #}
+                        {% set egg_id = product.config.egg_id %}
+                        {% set configurable_vars = product.config.variables_configurable %}
+                        
+                        {% if configurable_vars is defined and configurable_vars is not empty and egg_id %}
+                            {% set egg_vars = guest.servicepterodactyl_get_egg_variables({ "egg_id": egg_id }) %}
+                            
+                            {% if egg_vars is not empty %}
+                                <div class="mb-4 border p-3 rounded">
+                                    <h5 class="mb-3">{{ 'Server Configuration'|trans }}</h5>
+                                    {% for var in egg_vars %}
+                                        {% set env = var.attributes.env_variable %}
+                                        {% if configurable_vars[env] %}
+                                            <div class="mb-3">
+                                                <label class="form-label">
+                                                    {{ var.attributes.name }}
+                                                    {% if 'required' in var.attributes.rules %}<span class="text-danger">*</span>{% endif %}
+                                                </label>
+                                                <input type="text" class="form-control" 
+                                                       name="config[variables][{{ env }}]" 
+                                                       value="{{ product.config.variables[env] | default(var.attributes.default_value) }}"
+                                                       placeholder="{{ var.attributes.description }}"
+                                                       {% if 'required' in var.attributes.rules %}required{% endif %}
+                                                       {% if 'numeric' in var.attributes.rules or 'integer' in var.attributes.rules %}type="number"{% endif %}
+                                                >
+                                                <div class="form-text small text-muted">{{ var.attributes.description }}</div>
+                                            </div>
+                                        {% endif %}
+                                    {% endfor %}
+                                </div>
+                            {% endif %}
+                        {% endif %}
+
+                        {# Plans UI Container #}
+                        <div id="plans-container">
+                            <div class="text-center">
+                                <div class="spinner-border text-primary" role="status">
+                                    <span class="visually-hidden">Loading...</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        {# Fallback for no plans #}
+                        <div id="no-plans-message" style="display: none;">
+                            <p>{{ 'Please configure your server options.'|trans }}</p>
+                            <!-- You could add standard form fields here if no plans are defined -->
+                        </div>
+
+                        <div class="mt-4 d-flex justify-content-between align-items-center">
+                            <div class="h4 mb-0">
+                                {{ 'Total:'|trans }} <span id="price-display">{{ product.price_starting_from|money }}</span>
+                            </div>
+                            <button type="submit" class="btn btn-primary">{{ 'Continue'|trans }}</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        var plansMap = {};
+        // Inject locations data from Twig
+        var locationsData = {{ locations|json_encode|raw }};
+
+        document.addEventListener('DOMContentLoaded', function() {
+            // Safely get the JSON string
+            var rawPlans = {{ product.config.plans_json|default('[]')|json_encode|raw }};
+            var categories = [];
+            
+            var container = document.getElementById('plans-container');
+            var noPlans = document.getElementById('no-plans-message');
+
+            function escapeHtml(text) {
+                if (!text) return '';
+                return text
+                    .replace(/&/g, "&amp;")
+                    .replace(/</g, "&lt;")
+                    .replace(/>/g, "&gt;")
+                    .replace(/"/g, "&quot;")
+                    .replace(/'/g, "&#039;");
+            }
+            
+            // Initial check based on default values
+            var initialMem = document.getElementById('config_memory').value;
+            var initialDisk = document.getElementById('config_disk').value;
+            updateLocationAvailability(initialMem, initialDisk);
+            
+            try {
+                // If it's a string, parse it. If it's an object, use it.
+                if (typeof rawPlans === 'string') {
+                    categories = JSON.parse(rawPlans);
+                } else {
+                    categories = rawPlans;
+                }
+            } catch (e) {
+                console.error('Invalid Plans JSON:', e);
+            }
+
+            if (!Array.isArray(categories) || categories.length === 0) {
+                // No valid plans defined.
+                // If you want to show standard fields here, you would need to implement them.
+                // For now, we show a message or just submit with defaults.
+                container.style.display = 'none';
+                noPlans.style.display = 'block';
+                return;
+            }
+
+            try {
+                var html = '<div class="row g-4">';
+                
+                // Category Tabs
+                if (categories.length > 1) {
+                    html += '<div class="col-12"><ul class="nav nav-pills mb-3" id="pills-tab" role="tablist">';
+                    categories.forEach((cat, index) => {
+                        var active = index === 0 ? 'active' : '';
+                        html += `
+                            <li class="nav-item" role="presentation">
+                                <button class="nav-link ${active}" id="pills-${index}-tab" data-bs-toggle="pill" data-bs-target="#pills-${index}" type="button" role="tab">${escapeHtml(cat.name)}</button>
+                            </li>
+                        `;
+                    });
+                    html += '</ul></div>';
+                }
+
+                // Plans Content
+                html += '<div class="col-12"><div class="tab-content" id="pills-tabContent">';
+                categories.forEach((cat, index) => {
+                    var active = index === 0 ? 'show active' : '';
+                    html += `<div class="tab-pane fade ${active}" id="pills-${index}" role="tabpanel">`;
+                    
+                    if (cat.description) {
+                        html += `<p class="text-muted mb-3">${escapeHtml(cat.description)}</p>`;
+                    }
+
+                    html += '<div class="row row-cols-1 row-cols-md-3 g-4">';
+                    cat.plans.forEach(plan => {
+                        // Store plan in map
+                        plansMap[plan.id] = plan;
+                        
+                        html += `
+                            <div class="col">
+                                <div class="card h-100 plan-card" onclick="selectPlan(this, '${escapeHtml(plan.id)}')" data-plan-id="${escapeHtml(plan.id)}">
+                                    <div class="card-body">
+                                        <h5 class="card-title">${escapeHtml(plan.name)}</h5>
+                                        <h6 class="card-subtitle mb-2 text-muted">${escapeHtml(plan.price_display || '')}</h6>
+                                        <ul class="list-unstyled mt-3 mb-4">
+                                            <li><strong>${escapeHtml(String(plan.memory))} MB</strong> RAM</li>
+                                            <li><strong>${escapeHtml(String(plan.cpu))}%</strong> CPU</li>
+                                            <li><strong>${escapeHtml(String(plan.disk))} MB</strong> Disk</li>
+                                            ${plan.databases ? `<li><strong>${escapeHtml(String(plan.databases))}</strong> Databases</li>` : ''}
+                                            ${plan.allocations ? `<li><strong>${escapeHtml(String(plan.allocations))}</strong> Ports</li>` : ''}
+                                            ${plan.backups ? `<li><strong>${escapeHtml(String(plan.backups))}</strong> Backups</li>` : ''}
+                                        </ul>
+                                    </div>
+                                    <div class="card-footer bg-transparent border-top-0">
+                                        <button type="button" class="btn btn-outline-primary w-100 select-btn">{{ 'Select'|trans }}</button>
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+                    });
+                    html += '</div></div>';
+                });
+                html += '</div></div></div>';
+
+                container.innerHTML = html;
+
+                // Add CSS for selection
+                var style = document.createElement('style');
+                style.innerHTML = `
+                    .plan-card { cursor: pointer; transition: all 0.2s; border: 2px solid transparent; }
+                    .plan-card:hover { transform: translateY(-5px); box-shadow: 0 5px 15px rgba(0,0,0,0.1); }
+                    .plan-card.selected { border-color: var(--bs-primary); background-color: rgba(var(--bs-primary-rgb), 0.05); }
+                    .plan-card.selected .select-btn { background-color: var(--bs-primary); color: white; }
+                `;
+                document.head.appendChild(style);
+
+            } catch (e) {
+                console.error('Error parsing plans:', e);
+                container.style.display = 'none';
+                noPlans.style.display = 'block';
+            }
+        });
+
+        function selectPlan(card, id) {
+            var plan = plansMap[id];
+            if (!plan) return;
+            // Remove selected class from all cards and reset buttons
+            document.querySelectorAll('.plan-card').forEach(c => {
+                c.classList.remove('selected');
+                var btn = c.querySelector('.select-btn');
+                if (btn) {
+                    btn.innerText = '{{ "Select"|trans }}';
+                    btn.classList.remove('btn-primary');
+                    btn.classList.add('btn-outline-primary');
+                }
+            });
+            // Add selected class to clicked card and update button
+            card.classList.add('selected');
+            var btn = card.querySelector('.select-btn');
+            if (btn) {
+                btn.innerText = '{{ "Selected"|trans }}';
+                btn.classList.remove('btn-outline-primary');
+                btn.classList.add('btn-primary');
+            }
+
+            // Update hidden inputs
+            document.getElementById('config_plan_id').value = id;
+            if (plan.memory) document.getElementById('config_memory').value = plan.memory;
+            if (plan.swap) document.getElementById('config_swap').value = plan.swap;
+            if (plan.disk) document.getElementById('config_disk').value = plan.disk;
+            if (plan.cpu) document.getElementById('config_cpu').value = plan.cpu;
+            if (plan.io) document.getElementById('config_io').value = plan.io;
+            if (plan.databases) document.getElementById('config_databases').value = plan.databases;
+            if (plan.allocations) document.getElementById('config_allocations').value = plan.allocations;
+            if (plan.backups) document.getElementById('config_backups').value = plan.backups;
+            
+            // Check Location Availability based on new Plan requirements
+            updateLocationAvailability(plan.memory, plan.disk);
+
+            // Optional: Update Price Display (Visual Only)
+            // Note: This does not affect the actual cart price unless backend logic supports it.
+            // If the user uses Configurable Options, this script would need to update those inputs instead.
+            if (plan.price_display) {
+                document.getElementById('price-display').innerText = plan.price_display;
+            }
+        }
+
+        function updateLocationAvailability(reqMemory, reqDisk) {
+            var select = document.querySelector('select[name="config[location_id]"]');
+            if (!select) return;
+
+            reqMemory = parseInt(reqMemory) || 0;
+            reqDisk = parseInt(reqDisk) || 0;
+
+            var options = select.options;
+            var firstAvailable = null;
+
+            for (var i = 0; i < options.length; i++) {
+                var opt = options[i];
+                var locId = opt.value;
+                if (!locId) continue; // Skip placeholder
+
+                // Find location data
+                var loc = locationsData.find(l => l.id == locId);
+                if (loc) {
+                    var isAvailable = false;
+                    
+                    // Check if ANY node in this location has enough resources
+                    if (loc.nodes_capacity && Array.isArray(loc.nodes_capacity)) {
+                        for (var j = 0; j < loc.nodes_capacity.length; j++) {
+                            var node = loc.nodes_capacity[j];
+                            if (node.memory >= reqMemory && node.disk >= reqDisk) {
+                                isAvailable = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (isAvailable) {
+                        opt.disabled = false;
+                        opt.innerText = loc.short + ' - ' + loc.long;
+                        if (!firstAvailable) firstAvailable = opt;
+                    } else {
+                        opt.disabled = true;
+                        if (!opt.innerText.includes('({{ "Full"|trans }})')) {
+                             opt.innerText = loc.short + ' - ' + loc.long + ' ({{ "Full"|trans }})';
+                        }
+                        if (opt.selected) {
+                            opt.selected = false; // Deselect if currently selected but now full
+                            select.value = ""; // Reset value
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+{% endblock %}
