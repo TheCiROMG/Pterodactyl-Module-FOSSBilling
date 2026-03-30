@@ -86,6 +86,18 @@
                                 </div>
                             </div>
 
+                            <div class="mb-3 row">
+                                <label class="form-label col-3 col-form-label">{{ 'Send Password in Email'|trans }}:</label>
+                                <div class="col">
+                                    <input type="hidden" name="send_password_email" value="0">
+                                    <label class="form-check form-switch m-0">
+                                        <input class="form-check-input" type="checkbox" name="send_password_email" value="1" {% if settings.send_password_email|default(1) == 1 %}checked{% endif %}>
+                                        <span class="form-check-label">{{ 'Include the panel password in the "Account Created" email.'|trans }}</span>
+                                    </label>
+                                    <div class="form-text">{{ 'If disabled, the email will instruct the client to use the panel "Forgot password" flow instead.'|trans }}</div>
+                                </div>
+                            </div>
+
                             <hr>
 
                             <h2>{{ 'Allowed Nodes'|trans }}</h2>
