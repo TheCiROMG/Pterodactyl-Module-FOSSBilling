@@ -21,15 +21,29 @@ class Admin extends \Api_Abstract
     public function get_settings(): array
     {
         $systemService = $this->di['mod_service']('system');
-        
+
+        $allowedNodes = json_decode($systemService->getParamValue('servicepterodactyl_allowed_nodes', '[]'), true);
+        if (!is_array($allowedNodes)) {
+            $allowedNodes = [];
+        }
+        $allowedNodes = array_values(array_unique(array_map(static function ($v) {
+            return (int) $v;
+        }, $allowedNodes)));
+
+        $nodeAllocationMap = json_decode($systemService->getParamValue('servicepterodactyl_node_allocation_map', '{}'), true);
+        if (!is_array($nodeAllocationMap)) {
+            $nodeAllocationMap = [];
+        }
+
         return [
             'panel_url' => $systemService->getParamValue('servicepterodactyl_panel_url', ''),
             'api_key' => $systemService->getParamValue('servicepterodactyl_api_key', ''),
             'sso_secret' => $systemService->getParamValue('servicepterodactyl_sso_secret', ''),
             'client_api_key' => $systemService->getParamValue('servicepterodactyl_client_api_key', ''),
-            'allowed_nodes' => json_decode($systemService->getParamValue('servicepterodactyl_allowed_nodes', '[]'), true),
+            'send_password_email' => (int) $systemService->getParamValue('servicepterodactyl_send_password_email', 1),
+            'allowed_nodes' => $allowedNodes,
             'default_node' => (int) $systemService->getParamValue('servicepterodactyl_default_node', 0),
-            'node_allocation_map' => json_decode($systemService->getParamValue('servicepterodactyl_node_allocation_map', '{}'), true),
+            'node_allocation_map' => $nodeAllocationMap,
         ];
     }
 
@@ -58,9 +72,22 @@ class Admin extends \Api_Abstract
         if (isset($data['client_api_key'])) {
             $systemService->setParamValue('servicepterodactyl_client_api_key', $data['client_api_key']);
         }
+
+        if (isset($data['send_password_email'])) {
+            $systemService->setParamValue('servicepterodactyl_send_password_email', (int) $data['send_password_email']);
+        }
         
         if (isset($data['allowed_nodes'])) {
-            $systemService->setParamValue('servicepterodactyl_allowed_nodes', json_encode($data['allowed_nodes']));
+            $allowedNodes = $data['allowed_nodes'];
+            if (!is_array($allowedNodes)) {
+                $allowedNodes = [];
+            }
+            $allowedNodes = array_values(array_unique(array_map(static function ($v) {
+                return (int) $v;
+            }, $allowedNodes)));
+            $systemService->setParamValue('servicepterodactyl_allowed_nodes', json_encode($allowedNodes));
+        } elseif (array_key_exists('default_node', $data)) {
+            $systemService->setParamValue('servicepterodactyl_allowed_nodes', json_encode([]));
         }
         
         if (isset($data['default_node'])) {

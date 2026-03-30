@@ -31,32 +31,13 @@ class Service implements InjectionAwareInterface
     public function attachOrderConfig(\Model_Product $product, array $data): array
     {
         !empty($product->config) ? $config = json_decode($product->config, true) : $config = [];
-        
-        $cleanData = [];
 
-        // Validate Location Selection
-        if (isset($data['location_id']) && !empty($config['selectable_locations'])) {
-            // Ensure the selected location is in the allowed list
-            if (in_array($data['location_id'], $config['selectable_locations'])) {
-                $cleanData['location_id'] = $data['location_id'];
-            }
-        }
-
-        // Validate Configurable Variables
-        if (isset($data['variables']) && is_array($data['variables'])) {
-            $allowedVars = $config['variables_configurable'] ?? [];
-            foreach ($data['variables'] as $key => $value) {
-                // Only allow if variable is in allowed list
-                if (!empty($allowedVars[$key])) {
-                    $cleanData['variables'][$key] = $value;
-                }
-            }
-        }
+        // Validate required public variables
+        // We do NOT throw exceptions here to allow "Plug and Play" ordering even if the theme doesn't support custom fields.
+        // The user can configure variables in the Client Area after purchase.
         
-        // Only merge specific allowed user inputs.
-        // We do NOT use array_replace_recursive with raw $data to prevent
-        // users from overriding resource limits (memory, disk, etc.) or other sensitive settings.
-        return array_replace_recursive($config, $cleanData);
+        // Merge product config with submitted data (submitted data overrides product defaults)
+        return array_merge($config, $data);
     }
     
     /**
@@ -166,6 +147,10 @@ class Service implements InjectionAwareInterface
 
     public function create($order)
     {
+        // Debug log
+        $logFile = __DIR__ . '/service_log.txt';
+        $logMsg = date('Y-m-d H:i:s') . " - Create called for Order ID: " . ($order->id ?? 'unknown') . "\n";
+        
         try {
             // Ensure config is not empty
             $orderConfig = json_decode($order->config, true);
@@ -173,6 +158,8 @@ class Service implements InjectionAwareInterface
                 $orderConfig = [];
             }
             
+            $logMsg .= "Initial Order Config: " . json_encode($orderConfig) . "\n";
+
             // If product_id exists, merge with product config
             if (isset($order->product_id)) {
                 $product = $this->di['db']->load('product', $order->product_id);
@@ -180,8 +167,8 @@ class Service implements InjectionAwareInterface
                     $productConfig = json_decode($product->config, true);
                     if (is_array($productConfig)) {
                         // Product config defaults, overwritten by order config
-                        // Note: Sensitive resource limits should have been filtered in attachOrderConfig
-                        $orderConfig = array_replace_recursive($productConfig, $orderConfig);
+                        $orderConfig = array_merge($productConfig, $orderConfig);
+                        $logMsg .= "Merged Product Config. New keys: " . implode(',', array_keys($orderConfig)) . "\n";
                     }
                 }
             }
@@ -196,14 +183,15 @@ class Service implements InjectionAwareInterface
             $model->status = 'pending';
 
             $id = $this->di['db']->store($model);
+            $logMsg .= "Stored model. ID: " . $id . "\n";
 
+            file_put_contents($logFile, $logMsg, FILE_APPEND);
             return $model;
 
         } catch (\Exception $e) {
-            $errorMsg = "ERROR in create: " . $e->getMessage();
-            if (isset($this->di['logger'])) {
-                $this->di['logger']->error($errorMsg);
-            }
+            $errorMsg = "ERROR in create: " . $e->getMessage() . "\n" . $e->getTraceAsString() . "\n";
+            file_put_contents($logFile, $logMsg . $errorMsg, FILE_APPEND);
+            error_log($errorMsg);
             throw new \FOSSBilling\Exception('Failed to create service record: ' . $e->getMessage());
         }
     }
@@ -213,56 +201,98 @@ class Service implements InjectionAwareInterface
      */
     public function validate_config(array $config): bool
     {
+        return $this->validateResources($config);
+    }
+
+    /**
+     * Validate node resources before provisioning or payment
+     */
+    public function validateResources(array $config): bool
+    {
+        $panelConfig = $this->getPanelConfig($config);
+        $api = $this->getApi($config);
+        
+        $requiredMemory = (int)($config['memory'] ?? 0);
+        $requiredDisk = (int)($config['disk'] ?? 0);
+        
+        $autoPortEnabled = !empty($config['auto_port']);
+        $portCount = 1;
+        if ($autoPortEnabled) {
+            // Count AUTO_PORT environment variables
+            $eggId = (int)($config['egg_id'] ?? 0);
+            if ($eggId > 0) {
+                $eggInfo = $this->getEggInfo($eggId);
+                $environment = $this->prepareEnvironmentVariables($eggInfo, $config);
+                $autoPortRequests = [];
+                foreach ($environment as $key => $value) {
+                    if ($value === 'AUTO_PORT') {
+                        $autoPortRequests[] = $key;
+                    }
+                }
+                $portCount = count($autoPortRequests) + 1;
+            }
+        }
+
+        // 1. Location Auto-Selection logic check
         if (!empty($config['location_id'])) {
-            $requiredMemory = (int)($config['memory'] ?? 0);
-            $requiredDisk = (int)($config['disk'] ?? 0);
-            
-            // Ensure we have API access
-            $this->panelConfig = $this->getPanelConfig($config);
-            
-            // Get nodes in location
             $nodesInLocation = $this->getNodesInLocation((int)$config['location_id']);
-            $allowedNodes = $this->panelConfig['allowed_nodes'] ?? [];
-            
-            $availableNodeFound = false;
+            $allowedNodes = $panelConfig['allowed_nodes'] ?? [];
+            $foundSuitNode = false;
+
             foreach ($nodesInLocation as $node) {
-                // Check if node is allowed globally
                 if (!empty($allowedNodes) && !in_array($node['id'], $allowedNodes)) {
                     continue;
                 }
                 
-                // Check maintenance mode
-                if (!empty($node['maintenance_mode'])) {
-                    continue;
-                }
-                
-                // Calculate Memory
-                $totalMemory = $node['memory'];
-                $usedMemory = $node['allocated_resources']['memory'] ?? 0;
-                $memoryOverallocate = $node['memory_overallocate'] ?? 0;
-                
-                $totalMemoryAvailable = ($memoryOverallocate == -1) ? PHP_INT_MAX : $totalMemory * (1 + ($memoryOverallocate / 100));
-                $freeMemory = $totalMemoryAvailable - $usedMemory;
-
-                // Calculate Disk
-                $totalDisk = $node['disk'];
-                $usedDisk = $node['allocated_resources']['disk'] ?? 0;
-                $diskOverallocate = $node['disk_overallocate'] ?? 0;
-                
-                $totalDiskAvailable = ($diskOverallocate == -1) ? PHP_INT_MAX : $totalDisk * (1 + ($diskOverallocate / 100));
-                $freeDisk = $totalDiskAvailable - $usedDisk;
-
-                if ($freeMemory >= $requiredMemory && $freeDisk >= $requiredDisk) {
-                    $availableNodeFound = true;
+                try {
+                    $this->checkNodeResources($node['id'], $requiredMemory, $requiredDisk);
+                    if ($autoPortEnabled) {
+                        $api->findFreeAllocations($node['id'], $portCount);
+                    }
+                    $foundSuitNode = true;
                     break;
+                } catch (\Exception $e) {
+                    continue;
                 }
             }
             
-            if (!$availableNodeFound) {
-                throw new \FOSSBilling\Exception('The selected location is currently full. Please choose another location.');
+            if (!$foundSuitNode) {
+                throw new \FOSSBilling\Exception('No hay nodos disponibles con espacio suficiente en la ubicación seleccionada.');
             }
         }
-        
+        // 2. Specific Node selection logic check
+        else {
+            $selectableNodes = $config['selectable_nodes'] ?? [];
+            if (empty($selectableNodes) && !empty($config['node_id'])) {
+                $selectableNodes = [$config['node_id']];
+            }
+            if (empty($selectableNodes) && !empty($panelConfig['default_node'])) {
+                $selectableNodes = [$panelConfig['default_node']];
+            }
+
+            if (empty($selectableNodes)) {
+                return true; // No nodes configured, let it fail at provision
+            }
+
+            $foundSuitNode = false;
+            foreach ($selectableNodes as $candidateId) {
+                try {
+                    $this->checkNodeResources((int)$candidateId, $requiredMemory, $requiredDisk);
+                    if ($autoPortEnabled) {
+                        $api->findFreeAllocations((int)$candidateId, $portCount);
+                    }
+                    $foundSuitNode = true;
+                    break;
+                } catch (\Exception $e) {
+                    continue;
+                }
+            }
+
+            if (!$foundSuitNode) {
+                throw new \FOSSBilling\Exception('Los nodos disponibles para este servicio están llenos o no tienen puertos libres.');
+            }
+        }
+
         return true;
     }
 
@@ -296,31 +326,43 @@ class Service implements InjectionAwareInterface
                 $configUpdated = true;
             }
 
-            // Save initial password if new user created
-            if (isset($serverData['password'])) {
-                $config['initial_password'] = $serverData['password'];
+            // Save panel username if a new user was created
+            if (!empty($serverData['username'])) {
                 $config['panel_username'] = $serverData['username'];
                 $configUpdated = true;
 
-                // Send account created email
-                try {
-                    $emailService = $this->di['mod_service']('email');
-                    $globalConfig = $this->getGlobalPanelConfig();
-                    $panelUrl = isset($globalConfig['panel_url']) ? rtrim($globalConfig['panel_url'], '/') : '';
-                    
-                    $emailService->sendTemplate([
-                        'to_client' => $client->id,
-                        'code' => 'mod_servicepterodactyl_account_created',
-                        'username' => $serverData['username'],
-                        'password' => $serverData['password'],
-                        'panel_url' => $panelUrl,
-                        'client' => $client
-                    ]);
-                } catch (\Exception $e) {
-                    if (isset($this->di['logger'])) {
-                        try {
-                            $this->di['logger']->error('Failed to send Pterodactyl account email: ' . $e->getMessage());
-                        } catch (\Throwable $t) {}
+                // Only send email if the user is NEW in the panel
+                if (!empty($serverData['is_new'])) {
+                    try {
+                        $emailService = $this->di['mod_service']('email');
+                        $globalConfig = $this->getGlobalPanelConfig();
+                        $panelUrl = isset($globalConfig['panel_url']) ? rtrim($globalConfig['panel_url'], '/') : '';
+                        $sendPasswordEmail = !isset($globalConfig['send_password_email']) || (string) $globalConfig['send_password_email'] !== '0';
+                        
+                        if ($sendPasswordEmail && !empty($serverData['password'])) {
+                            $config['initial_password'] = $serverData['password'];
+                        }
+                        
+                        $payload = [
+                            'to_client' => $client->id,
+                            'code' => 'mod_servicepterodactyl_account_created',
+                            'username' => $serverData['username'],
+                            'panel_url' => $panelUrl,
+                            'reset_url' => $panelUrl ? ($panelUrl . '/auth/password') : '',
+                            'c' => $client
+                        ];
+
+                        if ($sendPasswordEmail && !empty($serverData['password'])) {
+                            $payload['password'] = $serverData['password'];
+                        }
+
+                        $emailService->sendTemplate($payload);
+                    } catch (\Exception $e) {
+                        if (isset($this->di['logger'])) {
+                            try {
+                                $this->di['logger']->error('Failed to send Pterodactyl account email: ' . $e->getMessage());
+                            } catch (\Throwable $t) {}
+                        }
                     }
                 }
             }
@@ -622,18 +664,12 @@ class Service implements InjectionAwareInterface
             
             if (!empty($response['data'])) {
                 foreach ($response['data'] as $node) {
-                    $attr = $node['attributes'];
                     $nodes[] = [
-                        'id' => $attr['id'],
-                        'name' => $attr['name'],
-                        'location_id' => $attr['location_id'],
-                        'public' => $attr['public'],
-                        'maintenance' => $attr['maintenance_mode'],
-                        'memory' => $attr['memory'],
-                        'disk' => $attr['disk'],
-                        'memory_overallocate' => $attr['memory_overallocate'] ?? 0,
-                        'disk_overallocate' => $attr['disk_overallocate'] ?? 0,
-                        'allocated_resources' => $attr['allocated_resources'] ?? ['memory' => 0, 'disk' => 0],
+                        'id' => $node['attributes']['id'],
+                        'name' => $node['attributes']['name'],
+                        'location_id' => $node['attributes']['location_id'],
+                        'public' => $node['attributes']['public'],
+                        'maintenance' => $node['attributes']['maintenance_mode'],
                     ];
                 }
             }
@@ -943,6 +979,7 @@ class Service implements InjectionAwareInterface
             } catch (\Exception $e) {
                 $bulk = [];
             }
+
             $excludeAllocationIds = array_values(array_filter(array_map(function ($a) {
                 return $a['id'] ?? null;
             }, $bulk), function ($v) {
@@ -953,6 +990,7 @@ class Service implements InjectionAwareInterface
             }, $bulk), function ($v) {
                 return !is_null($v);
             }));
+
             $missing = $portCount - count($bulk);
             if ($missing > 0) {
                 for ($i = 0; $i < $missing; $i++) {
@@ -1038,12 +1076,16 @@ class Service implements InjectionAwareInterface
         $result = [
             'id' => $serverId, 
             'identifier' => $serverIdentifier,
-            'node_id' => $actualNodeId
+            'node_id' => $actualNodeId,
+            'is_new' => $userData['is_new'] ?? false
         ];
 
-        if (!empty($userData['is_new']) && !empty($userData['password'])) {
-            $result['password'] = $userData['password'];
+        if (!empty($userData['username'])) {
             $result['username'] = $userData['username'];
+        }
+
+        if (!empty($userData['password'])) {
+            $result['password'] = $userData['password'];
         }
 
         return $result;
@@ -1132,21 +1174,28 @@ class Service implements InjectionAwareInterface
             if (!empty($response['data'])) {
                 return [
                     'id' => $response['data'][0]['attributes']['id'],
+                    'username' => $response['data'][0]['attributes']['username'],
                     'is_new' => false
                 ];
             }
             
             // Create new user if not found
+            $globalConfig = $this->getGlobalPanelConfig();
+            $sendPasswordEmail = !isset($globalConfig['send_password_email']) || (string) $globalConfig['send_password_email'] !== '0';
             $username = $this->generateUsername($email);
-            $password = $this->generateRandomPassword();
             
             $userData = [
                 'email' => $email,
                 'username' => $username,
                 'first_name' => $client->first_name ?? 'Client',
                 'last_name' => $client->last_name ?? 'User',
-                'password' => $password,
             ];
+
+            $password = null;
+            if ($sendPasswordEmail) {
+                $password = $this->generateRandomPassword();
+                $userData['password'] = $password;
+            }
             
             $response = $api->createUser($userData);
             
@@ -1154,12 +1203,17 @@ class Service implements InjectionAwareInterface
                 throw new \FOSSBilling\Exception('Failed to create user on Pterodactyl');
             }
             
-            return [
+            $result = [
                 'id' => $response['attributes']['id'],
                 'is_new' => true,
                 'username' => $username,
-                'password' => $password
             ];
+
+            if ($sendPasswordEmail) {
+                $result['password'] = $password;
+            }
+
+            return $result;
             
         } catch (\Exception $e) {
             throw new \FOSSBilling\Exception('Failed to get or create user: ' . $e->getMessage());
@@ -1180,14 +1234,9 @@ class Service implements InjectionAwareInterface
             $local = 'user';
         }
 
-        $suffix = substr(md5(strtolower($email)), 0, 6);
+        $suffix = (string)random_int(100, 999);
         $base = substr($local, 0, 20);
-        $username = $base . '_' . $suffix;
-
-        $username = trim($username, '._-');
-        if (strlen($username) < 3) {
-            $username = 'user_' . $suffix;
-        }
+        $username = $base . '-' . $suffix;
 
         return $username;
     }
@@ -1464,9 +1513,14 @@ class Service implements InjectionAwareInterface
     /**
      * Generate a random password/string
      */
-    private function generateRandomPassword(int $length = 16): string
+    private function generateRandomPassword(int $length = 12): string
     {
-        return bin2hex(random_bytes($length / 2));
+        $chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+        $password = '';
+        for ($i = 0; $i < $length; $i++) {
+            $password .= $chars[random_int(0, strlen($chars) - 1)];
+        }
+        return $password;
     }
 
     /**
@@ -1561,6 +1615,7 @@ class Service implements InjectionAwareInterface
                 'api_key' => $settingService->getParamValue('servicepterodactyl_api_key', ''),
                 'sso_secret' => $settingService->getParamValue('servicepterodactyl_sso_secret', ''),
                 'client_api_key' => $settingService->getParamValue('servicepterodactyl_client_api_key', ''),
+                'send_password_email' => $settingService->getParamValue('servicepterodactyl_send_password_email', 1),
                 'allowed_nodes' => json_decode($settingService->getParamValue('servicepterodactyl_allowed_nodes', '[]'), true) ?? [],
                 'default_node' => $settingService->getParamValue('servicepterodactyl_default_node', 0),
             ];

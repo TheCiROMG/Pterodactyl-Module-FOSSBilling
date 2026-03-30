@@ -4,8 +4,15 @@
 <p>An account has been created for you on the Pterodactyl Panel.</p>
 <p><strong>Panel URL:</strong> <a href="{{ panel_url }}" target="_blank">{{ panel_url }}</a></p>
 <p><strong>Username:</strong> {{ username }}</p>
+{% if password is defined and password %}
 <p><strong>Password:</strong> {{ password }}</p>
-<p><strong>Email:</strong> {{ c.email }}</p>
 <p>Please change your password after logging in.</p>
+{% else %}
+<p>To set your password, use the "Forgot password" option on the panel login page.</p>
+{% if reset_url is defined and reset_url %}
+<p><strong>Set Password:</strong> <a href="{{ reset_url }}" target="_blank">{{ reset_url }}</a></p>
+{% endif %}
+{% endif %}
+<p><strong>Email:</strong> {{ c.email }}</p>
 <p class="signature">{{ guest.system_company.signature }}</p>
 {% endblock %}

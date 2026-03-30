@@ -67,29 +67,16 @@
                 <label class="form-label col-3 col-form-label">{{ 'Location'|trans }}:</label>
                 <div class="col">
                     {% if locations %}
-                        {% set selected_locations = product.config.selectable_locations|default([]) %}
-                        <div class="alert alert-info py-1 mb-2">
-                            <small>{{ 'Select multiple locations to allow users to choose during checkout.'|trans }}</small>
-                        </div>
-                        <div id="location_select_list" style="max-height: 200px; overflow-y: auto; border: 1px solid #dee2e6; padding: 10px; border-radius: 4px;">
-                            {% for location in locations %}
-                                <div class="form-check">
-                                    <input class="form-check-input" type="checkbox" name="config[selectable_locations][]" value="{{ location.id }}" id="location_{{ location.id }}" {% if location.id in selected_locations %}checked{% endif %}>
-                                    <label class="form-check-label" for="location_{{ location.id }}">
-                                        {{ location.short }} - {{ location.long }} (ID: {{ location.id }})
-                                    </label>
-                                </div>
-                            {% endfor %}
-                        </div>
-                        <div class="mt-2">
-                            <a href="#" onclick="selectAllLocations(true); return false;" class="btn btn-sm btn-outline-secondary">{{ 'Select All'|trans }}</a>
-                            <a href="#" onclick="selectAllLocations(false); return false;" class="btn btn-sm btn-outline-secondary">{{ 'Deselect All'|trans }}</a>
-                        </div>
-                        {# Keep the old input for backward compatibility or single selection logic if needed #}
-                        <input type="hidden" name="config[location_id]" value="{{ product.config.location_id }}">
+                    <select class="form-select" name="config[location_id]">
+                        <option value="">{{ 'Select Location'|trans }}</option>
+                        {% for location in locations %}
+                        <option value="{{ location.id }}" {% if product.config.location_id == location.id %}selected{% endif %}>{{ location.short }} - {{ location.long }} (ID: {{ location.id }})</option>
+                        {% endfor %}
+                    </select>
+                    <div class="form-text">{{ 'Servers will be automatically placed on a node in this location.'|trans }}</div>
                     {% else %}
-                        <input type="number" class="form-control" name="config[location_id]" value="{{ product.config.location_id }}">
-                        <div class="form-text text-danger">{{ 'Could not fetch locations from API. Please enter ID manually.'|trans }}</div>
+                    <input type="number" class="form-control" name="config[location_id]" value="{{ product.config.location_id }}">
+                    <div class="form-text text-danger">{{ 'Could not fetch locations from API. Please enter ID manually.'|trans }}</div>
                     {% endif %}
                 </div>
             </div>
@@ -144,12 +131,6 @@
 
             function selectAllNodes(select) {
                 var checkboxes = document.querySelectorAll('input[name="config[selectable_nodes][]"]');
-                checkboxes.forEach(function(checkbox) {
-                    checkbox.checked = select;
-                });
-            }
-            function selectAllLocations(select) {
-                var checkboxes = document.querySelectorAll('input[name="config[selectable_locations][]"]');
                 checkboxes.forEach(function(checkbox) {
                     checkbox.checked = select;
                 });
@@ -215,17 +196,6 @@
 
             <hr>
 
-            <h2>{{ 'Plans Configuration (Advanced)'|trans }}</h2>
-            <div class="mb-3 row">
-                <label class="form-label col-3 col-form-label">{{ 'Plans JSON'|trans }}:</label>
-                <div class="col">
-                    <textarea class="form-control" name="config[plans_json]" rows="10" placeholder='[{"name":"Standard","description":"Basic plans","plans":[{"id":"basic","name":"Basic","memory":1024,"disk":5000,"cpu":100,"price":"5.00"}]}]'>{{ product.config.plans_json }}</textarea>
-                    <div class="form-text">{{ 'Define available plans for the configuration page. Leave empty to use standard resource fields.'|trans }}</div>
-                </div>
-            </div>
-
-            <hr>
-
             <h2>{{ 'Docker & Startup'|trans }}</h2>
             <div class="mb-3 row">
                 <label class="form-label col-3 col-form-label">{{ 'Docker Image'|trans }}:</label>
@@ -269,16 +239,6 @@
                         return;
                     }
 
-                    function escapeHtml(text) {
-                        if (text === null || text === undefined) return '';
-                        return String(text)
-                            .replace(/&/g, "&amp;")
-                            .replace(/</g, "&lt;")
-                            .replace(/>/g, "&gt;")
-                            .replace(/"/g, "&quot;")
-                            .replace(/'/g, "&#039;");
-                    }
-
                     container.innerHTML = '<div class="text-center"><div class="spinner-border" role="status"></div><br/>{{ "Loading Egg variables..."|trans }}</div>';
 
                     API.admin.post('servicepterodactyl/get_egg_details', { egg_id: eggId }, function(response) {
@@ -299,7 +259,7 @@
                                 dockerHtml += '<option value="">{{ "Select an image..."|trans }}</option>';
                                 
                                 for (const [name, image] of Object.entries(response.docker_images)) {
-                                    dockerHtml += `<option value="${escapeHtml(image)}">${escapeHtml(name)} (${escapeHtml(image)})</option>`;
+                                    dockerHtml += `<option value="${image}">${name} (${image})</option>`;
                                 }
                                 dockerHtml += '</select></div>';
                                 dockerContainer.insertAdjacentHTML('beforeend', dockerHtml);
@@ -334,7 +294,7 @@
 
                             // Prepare current values from product config
                             const currentConfig = {{ product.config.variables|json_encode|raw }}; // This might be null or undefined initially
-                            const currentConfigurable = {{ product.config.variables_configurable|json_encode|raw }};
+                            const currentVisible = {{ product.config.variables_visible|json_encode|raw }};
 
                             variables.forEach(function(item) {
                                 const v = item.attributes;
@@ -346,33 +306,20 @@
                                 if (currentConfig && currentConfig[env] !== undefined) {
                                     value = currentConfig[env];
                                 }
-
-                                // Check if configurable
-                                let isConfigurable = false;
-                                if (currentConfigurable && currentConfigurable[env]) {
-                                    isConfigurable = true;
-                                }
                                 
                                 let inputHtml = '';
-                                const description = v.description ? `<div class="form-text">${escapeHtml(v.description)}</div>` : '';
+                                const description = v.description ? `<div class="form-text">${v.description}</div>` : '';
                                 const required = v.rules.includes('required') ? 'required' : '';
                                 
                                 inputHtml = `
-                                    <div class="mb-3 row border-bottom pb-3">
-                                        <label class="form-label col-3 col-form-label">${escapeHtml(v.name)} (${escapeHtml(env)}):</label>
+                                    <div class="mb-3 row">
+                                        <label class="form-label col-3 col-form-label">${v.name} (${env}):</label>
                                         <div class="col">
                                             <div class="input-group">
-                                                <input type="text" class="form-control" name="${fieldName}" value="${escapeHtml(value)}" ${required} placeholder="${escapeHtml(v.default_value)}">
+                                                <input type="text" class="form-control" name="${fieldName}" value="${value}" ${required} placeholder="${v.default_value}">
                                             </div>
                                             <div class="form-text text-muted">Use <code>AUTO_PORT</code> for automatic port assignment or <code>AUTO_PASSWORD</code> to generate a random password.</div>
                                             ${description}
-                                            
-                                            <div class="form-check mt-2">
-                                                <input class="form-check-input" type="checkbox" name="config[variables_configurable][${env}]" value="1" id="conf_${env}" ${isConfigurable ? 'checked' : ''}>
-                                                <label class="form-check-label" for="conf_${env}">
-                                                    {{ 'Allow User Configuration at Checkout'|trans }}
-                                                </label>
-                                            </div>
                                         </div>
                                     </div>
                                 `;

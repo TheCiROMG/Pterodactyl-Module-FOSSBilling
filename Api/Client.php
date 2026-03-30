@@ -75,9 +75,39 @@ class Client extends \Api_Abstract
         $url = $service->getSSOUrl($order);
         
         if (empty($url)) {
-            throw new \FOSSBilling\Exception('SSO not available. Please check if the WemX SSO plugin is installed and configured correctly on the Pterodactyl panel.');
+            throw new \FOSSBilling\Exception('SSO not available. Please check if the WemX SSO plugin is installed and configured correctly on the panel.');
         }
         
         return $url;
+    }
+
+    /**
+     * Validate node resources before payment
+     *
+     * @param array $data
+     * @return bool
+     */
+    public function validate_stock($data): bool
+    {
+        if (empty($data['product_id'])) {
+            throw new \FOSSBilling\Exception('Product ID is required');
+        }
+
+        $product = $this->di['db']->getExistingModelById('Product', $data['product_id'], 'Product not found');
+        
+        // Product configuration
+        $config = json_decode($product->config, true) ?? [];
+        
+        // Merge with any submitted data (like custom fields)
+        $orderConfig = array_merge($config, $data);
+        
+        $service = $this->getService();
+        
+        try {
+            $service->validateResources($orderConfig);
+            return true;
+        } catch (\Exception $e) {
+            throw new \FOSSBilling\Exception("No se a podido aprovisionar/activar el servicio, el pago a sido cancelado, por favor, contacte a un administrador. (Detalle: " . $e->getMessage() . ")");
+        }
     }
 }

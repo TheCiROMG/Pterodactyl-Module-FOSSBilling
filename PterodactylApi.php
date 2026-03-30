@@ -81,7 +81,7 @@ class PterodactylApi
 
     public function getNodes(): array
     {
-        return $this->getAllPages('/api/application/nodes');
+        return $this->request('GET', '/api/application/nodes');
     }
 
     public function getNode(int $id): array
@@ -91,40 +91,13 @@ class PterodactylApi
 
     public function getLocations(): array
     {
-        return $this->getAllPages('/api/application/locations');
+        return $this->request('GET', '/api/application/locations');
     }
 
     public function getEggs(?int $nestId = null): array
     {
         $endpoint = $nestId ? "/api/application/nests/{$nestId}/eggs" : '/api/application/nests?include=eggs';
-        return $this->getAllPages($endpoint);
-    }
-
-    /**
-     * Helper to fetch all pages of a resource
-     */
-    private function getAllPages(string $endpoint): array
-    {
-        $results = ['data' => []];
-        $page = 1;
-        
-        do {
-            $separator = (strpos($endpoint, '?') === false) ? '?' : '&';
-            $response = $this->request('GET', $endpoint . $separator . 'page=' . $page);
-            
-            if (empty($response['data'])) {
-                break;
-            }
-            
-            $results['data'] = array_merge($results['data'], $response['data']);
-            
-            $meta = $response['meta']['pagination'] ?? [];
-            $totalPages = $meta['total_pages'] ?? 1;
-            $page++;
-            
-        } while ($page <= $totalPages);
-        
-        return $results;
+        return $this->request('GET', $endpoint);
     }
 
     public function getEgg(int $nestId, int $eggId): array
@@ -250,7 +223,7 @@ class PterodactylApi
     {
         $response = $this->getAllocations($nodeId);
         $allocations = $response['data'] ?? [];
-        
+
         $excludedAllocationIdMap = array_fill_keys(array_map('intval', $excludeAllocationIds), true);
         $excludedPortMap = array_fill_keys(array_map('intval', $excludePorts), true);
 
@@ -261,9 +234,9 @@ class PterodactylApi
                 continue;
             }
 
-            $id = (int)($attr['id'] ?? 0);
-            $port = (int)($attr['port'] ?? 0);
-            $ip = (string)($attr['ip'] ?? '');
+            $id = (int) ($attr['id'] ?? 0);
+            $port = (int) ($attr['port'] ?? 0);
+            $ip = (string) ($attr['ip'] ?? '');
 
             if ($id === 0 || $port === 0) {
                 continue;
@@ -286,31 +259,27 @@ class PterodactylApi
             return $firstMatch;
         }
         
-        $usedPorts = $excludedPortMap;
+        $usedPorts = [];
         foreach ($allocations as $allocation) {
-            $attr = $allocation['attributes'] ?? [];
-            if (!isset($attr['port'])) {
-                continue;
+            $port = (int) ($allocation['attributes']['port'] ?? 0);
+            if ($port > 0) {
+                $usedPorts[] = $port;
             }
-
-            $usedPorts[(int)$attr['port']] = true;
         }
+        $usedPorts = array_values(array_unique(array_merge($usedPorts, array_map('intval', $excludePorts))));
+        $usedPortMap = array_fill_keys($usedPorts, true);
         
         $port = $startPort;
         $maxTries = 1000;
         
         for ($i = 0; $i < $maxTries; $i++) {
-            if (!isset($usedPorts[$port])) {
+            if (!isset($usedPortMap[$port])) {
                 break;
             }
             $port++;
             if ($endPort && $port > $endPort) {
                 throw new \FOSSBilling\Exception('No free ports available within the specified range.');
             }
-        }
-
-        if (isset($usedPorts[$port])) {
-            throw new \FOSSBilling\Exception('No free ports available on node.');
         }
         
         $targetIp = $preferredIp;
@@ -410,5 +379,10 @@ class PterodactylApi
         }
         
         throw new \FOSSBilling\Exception('Failed to get SSO redirect URL: ' . ($response['message'] ?? 'Unknown error'));
+    }
+
+    public function sendPasswordReset(int $userId): void
+    {
+        $this->request('POST', "/api/application/users/{$userId}/password-reset");
     }
 }
