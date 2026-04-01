@@ -21,11 +21,17 @@ class PterodactylApi
     public function request(string $method, string $endpoint, array $data = []): array
     {
         $url = $this->panelUrl . $endpoint;
+        if (strtoupper($method) === 'GET') {
+            $ts = (string) round(microtime(true) * 1000);
+            $url .= (strpos($endpoint, '?') === false ? '?' : '&') . '_ts=' . $ts;
+        }
         
         $headers = [
             'Authorization: Bearer ' . $this->apiKey,
             'Content-Type: application/json',
             'Accept: Application/vnd.pterodactyl.v1+json',
+            'Cache-Control: no-cache, no-store, max-age=0',
+            'Pragma: no-cache',
         ];
 
         $ch = curl_init();

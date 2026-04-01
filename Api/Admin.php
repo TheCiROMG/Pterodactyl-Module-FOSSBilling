@@ -74,7 +74,9 @@ class Admin extends \Api_Abstract
         }
 
         if (isset($data['send_password_email'])) {
-            $systemService->setParamValue('servicepterodactyl_send_password_email', (int) $data['send_password_email']);
+            $v = strtolower(trim((string) $data['send_password_email']));
+            $enabled = !in_array($v, ['0', 'false', 'off', 'no', ''], true) ? 1 : 0;
+            $systemService->setParamValue('servicepterodactyl_send_password_email', $enabled);
         }
         
         if (isset($data['allowed_nodes'])) {
