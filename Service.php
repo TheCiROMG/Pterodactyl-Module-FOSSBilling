@@ -331,35 +331,40 @@ class Service implements InjectionAwareInterface
                 $config['panel_username'] = $serverData['username'];
                 $configUpdated = true;
 
-                // Only send email if the user is NEW in the panel
-                if (!empty($serverData['is_new'])) {
-                    try {
+                // Send Account Created email ONLY when we actually generated a password
+                // (i.e. only for truly new panel users in auto-password mode)
+                try {
+                    $globalConfig = $this->getGlobalPanelConfig();
+                    $sendPasswordEmail = $this->isTruthy($globalConfig['send_password_email'] ?? 1);
+
+                    if ($sendPasswordEmail && !empty($serverData['password'])) {
                         $emailService = $this->di['mod_service']('email');
-                        $globalConfig = $this->getGlobalPanelConfig();
                         $panelUrl = isset($globalConfig['panel_url']) ? rtrim($globalConfig['panel_url'], '/') : '';
-                        $sendPasswordEmail = !isset($globalConfig['send_password_email']) || (string) $globalConfig['send_password_email'] !== '0';
-                        
+
                         $payload = [
                             'to_client' => $client->id,
                             'code' => 'mod_servicepterodactyl_account_created',
                             'username' => $serverData['username'],
                             'panel_url' => $panelUrl,
                             'reset_url' => $panelUrl ? ($panelUrl . '/auth/password') : '',
-                            'c' => $client
                         ];
 
-                        if ($sendPasswordEmail && !empty($serverData['password'])) {
-                            $payload['password'] = $serverData['password'];
-                            $config['initial_password'] = $serverData['password'];
-                        }
+                        $payload['password'] = $serverData['password'];
+                        $config['initial_password'] = $serverData['password'];
 
+                        $this->ensureEmailTemplateEnabled(
+                            'mod_servicepterodactyl_account_created',
+                            'Account Created (Auto Password)',
+                            $this->getAccountCreatedEmailBody(),
+                            'servicepterodactyl'
+                        );
                         $emailService->sendTemplate($payload);
-                    } catch (\Exception $e) {
-                        if (isset($this->di['logger'])) {
-                            try {
-                                $this->di['logger']->error('Failed to send Pterodactyl account email: ' . $e->getMessage());
-                            } catch (\Throwable $t) {}
-                        }
+                    }
+                } catch (\Exception $e) {
+                    if (isset($this->di['logger'])) {
+                        try {
+                            $this->di['logger']->error('Failed to send Pterodactyl account email: ' . $e->getMessage());
+                        } catch (\Throwable $t) {}
                     }
                 }
             }
@@ -1178,7 +1183,7 @@ class Service implements InjectionAwareInterface
             
             // Create new user if not found
             $globalConfig = $this->getGlobalPanelConfig();
-            $sendPasswordEmail = !isset($globalConfig['send_password_email']) || (string) $globalConfig['send_password_email'] !== '0';
+            $sendPasswordEmail = $this->isTruthy($globalConfig['send_password_email'] ?? 1);
             $username = $this->generateUsername($email);
             
             $userData = [
@@ -1224,14 +1229,14 @@ class Service implements InjectionAwareInterface
     {
         $local = explode('@', $email)[0] ?? '';
         $local = strtolower($local);
-        $local = preg_replace('/[^a-z0-9]/', '', $local); // Solo letras y números, sin símbolos
+        $local = preg_replace('/[^a-z0-9]/', '', $local);
 
         if (strlen($local) < 3) {
             $local = 'user';
         }
 
         $suffix = (string)random_int(100, 999);
-        $base = substr($local, 0, 15); // Un poco más corto para el base
+        $base = substr($local, 0, 15);
         $username = $base . '-' . $suffix;
 
         return $username;
@@ -1519,6 +1524,65 @@ class Service implements InjectionAwareInterface
         return $password;
     }
 
+    private function ensureEmailTemplateEnabled(string $code, string $subject, string $content, string $category): void
+    {
+        $db = $this->di['db'];
+        $t = $db->findOne('EmailTemplate', 'action_code = :action', [':action' => $code]);
+        if (!$t instanceof \Model_EmailTemplate) {
+            $t = $db->dispense('EmailTemplate');
+            $t->enabled = 1;
+            $t->action_code = $code;
+            $t->category = $category;
+            $t->subject = $subject;
+            $t->content = $content;
+            $t->description = $subject;
+            $db->store($t);
+            return;
+        }
+
+        $changed = false;
+        if (!(int) $t->enabled) {
+            $t->enabled = 1;
+            $changed = true;
+        }
+        if (!is_string($t->subject) || trim($t->subject) === '') {
+            $t->subject = $subject;
+            $changed = true;
+        }
+        if (!is_string($t->content) || trim($t->content) === '') {
+            $t->content = $content;
+            $changed = true;
+        }
+        if (!is_string($t->category) || trim($t->category) === '') {
+            $t->category = $category;
+            $changed = true;
+        }
+        if ($changed) {
+            $db->store($t);
+        }
+    }
+
+    private function getAccountCreatedEmailBody(): string
+    {
+        return implode("\n", [
+            '<p>Hello {{ c.first_name }} {{ c.last_name }},</p>',
+            '<p>An account has been created for you on the panel.</p>',
+            '<p><strong>Panel URL:</strong> <a href="{{ panel_url }}" target="_blank">{{ panel_url }}</a></p>',
+            '<p><strong>Username:</strong> {{ username }}</p>',
+            '{% if password is defined and password %}',
+            '<p><strong>Password:</strong> {{ password }}</p>',
+            '<p>Please change your password after logging in.</p>',
+            '{% else %}',
+            '<p>To set your password, use the "Forgot password" option on the panel login page.</p>',
+            '{% if reset_url is defined and reset_url %}',
+            '<p><strong>Set Password:</strong> <a href="{{ reset_url }}" target="_blank">{{ reset_url }}</a></p>',
+            '{% endif %}',
+            '{% endif %}',
+            '<p><strong>Email:</strong> {{ c.email }}</p>',
+            '<p class="signature">{{ guest.system_company.signature }}</p>',
+        ]);
+    }
+
     /**
      * Get server information from Pterodactyl
      */
@@ -1619,5 +1683,15 @@ class Service implements InjectionAwareInterface
             // If system service not available, return empty array
             return [];
         }
+    }
+
+    private function isTruthy($value): bool
+    {
+        if (is_bool($value)) {
+            return $value;
+        }
+
+        $v = strtolower(trim((string) $value));
+        return !in_array($v, ['0', 'false', 'off', 'no', ''], true);
     }
 }
